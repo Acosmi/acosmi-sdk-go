@@ -1,0 +1,31 @@
+{
+  "name": "@acosmi/crabclaw",
+  "version": "0.1.0",
+  "description": "Acosmi 技能商店 CLI — 搜索、安装、上传和管理技能",
+  "bin": {
+    "crabclaw": "./bin/crabclaw.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "keywords": [
+    "acosmi",
+    "crabclaw",
+    "skill-store",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acosmi/acosmi-sdk-go"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
