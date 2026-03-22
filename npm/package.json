@@ -1,16 +1,16 @@
 {
-  "name": "@acosmi/crabclaw",
+  "name": "@acosmi/crabclaw-skill",
   "version": "0.1.0",
   "description": "Acosmi 技能商店 CLI — 搜索、安装、上传和管理技能",
   "bin": {
-    "crabclaw": "./bin/crabclaw.js"
+    "crabclaw-skill": "./bin/crabclaw-skill.js"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js"
   },
   "keywords": [
     "acosmi",
-    "crabclaw",
+    "crabclaw-skill",
     "skill-store",
     "cli"
   ],

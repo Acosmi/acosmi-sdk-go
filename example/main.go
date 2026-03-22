@@ -35,7 +35,7 @@ func main() {
 	// 2. 首次使用需要登录 (会打开浏览器, 一次授权获取全部 scope)
 	if !client.IsAuthorized() {
 		fmt.Println("首次使用，将打开浏览器进行授权...")
-		err := client.Login(ctx, "CrabClaw Desktop Agent", acosmi.AllScopes)
+		err := client.Login(ctx, "CrabClaw-Skill Desktop Agent", acosmi.AllScopes())
 		if err != nil {
 			log.Fatalf("授权失败: %v", err)
 		}

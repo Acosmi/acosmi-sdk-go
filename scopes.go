@@ -14,31 +14,41 @@ const (
 	ScopeProfile       = "profile"
 )
 
+// [RC-9] Scope 预设组改为函数, 返回新切片, 防止外部篡改
+
 // AllScopes 全部可用 scope
-var AllScopes = []string{
-	ScopeModels, ScopeModelsChat,
-	ScopeEntitlements, ScopeTokenPackages,
-	ScopeSkillStore, ScopeTools, ScopeToolsExecute,
-	ScopeWallet, ScopeWalletReadonly,
-	ScopeProfile,
+func AllScopes() []string {
+	return []string{
+		ScopeModels, ScopeModelsChat,
+		ScopeEntitlements, ScopeTokenPackages,
+		ScopeSkillStore, ScopeTools, ScopeToolsExecute,
+		ScopeWallet, ScopeWalletReadonly,
+		ScopeProfile,
+	}
 }
 
 // ModelScopes 模型商业化相关 scope
-var ModelScopes = []string{
-	ScopeModels, ScopeModelsChat,
-	ScopeEntitlements,
+func ModelScopes() []string {
+	return []string{
+		ScopeModels, ScopeModelsChat,
+		ScopeEntitlements,
+	}
 }
 
 // CommerceScopes 商城/钱包 scope
-var CommerceScopes = []string{
-	ScopeModels,
-	ScopeEntitlements,
-	ScopeTokenPackages,
-	ScopeWalletReadonly,
+func CommerceScopes() []string {
+	return []string{
+		ScopeModels,
+		ScopeEntitlements,
+		ScopeTokenPackages,
+		ScopeWalletReadonly,
+	}
 }
 
 // SkillScopes 技能/工具 scope
-var SkillScopes = []string{
-	ScopeSkillStore,
-	ScopeTools,
+func SkillScopes() []string {
+	return []string{
+		ScopeSkillStore,
+		ScopeTools,
+	}
 }

@@ -7,9 +7,9 @@ const http = require("http");
 const { execSync } = require("child_process");
 
 // 支持环境变量跳过下载 (离线/CI)
-if (process.env.CRABCLAW_BINARY_PATH) {
+if (process.env.CRABCLAW_SKILL_BINARY_PATH) {
   console.log(
-    `[crabclaw] Using binary from CRABCLAW_BINARY_PATH: ${process.env.CRABCLAW_BINARY_PATH}`
+    `[crabclaw-skill] Using binary from CRABCLAW_SKILL_BINARY_PATH: ${process.env.CRABCLAW_SKILL_BINARY_PATH}`
   );
   process.exit(0);
 }
@@ -33,28 +33,28 @@ const arch = ARCH_MAP[process.arch];
 
 if (!platform || !arch) {
   console.error(
-    `[crabclaw] Unsupported platform: ${process.platform}/${process.arch}`
+    `[crabclaw-skill] Unsupported platform: ${process.platform}/${process.arch}`
   );
   process.exit(1);
 }
 
 const ext = platform === "windows" ? ".exe" : "";
-const binaryName = `crabclaw-${platform}-${arch}${ext}`;
+const binaryName = `crabclaw-skill-${platform}-${arch}${ext}`;
 const downloadUrl = `https://github.com/acosmi/acosmi-sdk-go/releases/download/v${version}/${binaryName}`;
 const binDir = path.join(__dirname, "..", "bin");
-const destPath = path.join(binDir, `crabclaw${ext}`);
+const destPath = path.join(binDir, `crabclaw-skill${ext}`);
 
 // 确保 bin 目录存在
 if (!fs.existsSync(binDir)) {
   fs.mkdirSync(binDir, { recursive: true });
 }
 
-console.log(`[crabclaw] Downloading ${binaryName} from GitHub Releases...`);
+console.log(`[crabclaw-skill] Downloading ${binaryName} from GitHub Releases...`);
 
 function download(url, dest, redirects) {
   if (redirects === undefined) redirects = 5;
   if (redirects <= 0) {
-    console.error("[crabclaw] Too many redirects");
+    console.error("[crabclaw-skill] Too many redirects");
     process.exit(1);
   }
 
@@ -68,13 +68,13 @@ function download(url, dest, redirects) {
 
       if (res.statusCode !== 200) {
         console.error(
-          `[crabclaw] Download failed: HTTP ${res.statusCode}`
+          `[crabclaw-skill] Download failed: HTTP ${res.statusCode}`
         );
         console.error(
-          `[crabclaw] You can manually download from: ${downloadUrl}`
+          `[crabclaw-skill] You can manually download from: ${downloadUrl}`
         );
         console.error(
-          `[crabclaw] Or set CRABCLAW_BINARY_PATH to an existing binary`
+          `[crabclaw-skill] Or set CRABCLAW_SKILL_BINARY_PATH to an existing binary`
         );
         process.exit(1);
       }
@@ -87,13 +87,13 @@ function download(url, dest, redirects) {
         if (process.platform !== "win32") {
           fs.chmodSync(dest, 0o755);
         }
-        console.log(`[crabclaw] Binary installed to ${dest}`);
+        console.log(`[crabclaw-skill] Binary installed to ${dest}`);
       });
     })
     .on("error", (err) => {
-      console.error(`[crabclaw] Download error: ${err.message}`);
+      console.error(`[crabclaw-skill] Download error: ${err.message}`);
       console.error(
-        `[crabclaw] Set CRABCLAW_BINARY_PATH to skip download`
+        `[crabclaw-skill] Set CRABCLAW_SKILL_BINARY_PATH to skip download`
       );
       process.exit(1);
     });

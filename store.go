@@ -25,12 +25,16 @@ type FileTokenStore struct {
 
 // NewFileTokenStore 创建文件 token 存储
 // 默认路径: ~/.acosmi/tokens.json (合并后统一路径)
-func NewFileTokenStore(path string) *FileTokenStore {
+// [RC-10] 返回 error, 防止 os.UserHomeDir() 失败时路径变为 /.acosmi/
+func NewFileTokenStore(path string) (*FileTokenStore, error) {
 	if path == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("cannot determine home directory: %w", err)
+		}
 		path = filepath.Join(home, ".acosmi", "tokens.json")
 	}
-	return &FileTokenStore{path: path}
+	return &FileTokenStore{path: path}, nil
 }
 
 func (s *FileTokenStore) Save(tokens *TokenSet) error {
@@ -69,8 +73,13 @@ func (s *FileTokenStore) Load() (*TokenSet, error) {
 	return &tokens, nil
 }
 
+// [RC-11] 文件不存在时不传播错误 (Logout 后 Clear 不应报错)
 func (s *FileTokenStore) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return os.Remove(s.path)
+	err := os.Remove(s.path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

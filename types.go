@@ -51,21 +51,18 @@ type ClientRegistration struct {
 
 // ManagedModel 托管模型
 type ManagedModel struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Provider  string `json:"provider"`
-	ModelID   string `json:"modelId"`
-	MaxTokens int    `json:"maxTokens"`
-	IsEnabled bool   `json:"isEnabled"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Provider      string  `json:"provider"`
+	ModelID       string  `json:"modelId"`
+	MaxTokens     int     `json:"maxTokens"`
+	IsEnabled     bool    `json:"isEnabled"`
+	PricePerMTok  float64 `json:"pricePerMTok,omitempty"`
+	IsDefault     bool    `json:"isDefault,omitempty"`
+	ContextWindow int     `json:"contextWindow,omitempty"`
 }
 
-// ModelUsage 模型用量统计
-type ModelUsage struct {
-	TotalCalls    int64   `json:"totalCalls"`
-	TotalTokens   int64   `json:"totalTokens"`
-	AvgLatencyMs  float64 `json:"avgLatencyMs"`
-	SuccessRate   float64 `json:"successRate"`
-}
+// [RC-2] ModelUsage 已移除: /managed-models/usage 端点已迁移至 tk-dist
 
 // ChatMessage 聊天消息
 type ChatMessage struct {
@@ -195,13 +192,7 @@ type OrderStatus struct {
 	Status  string `json:"status"`
 }
 
-// OrderPage 订单分页响应
-type OrderPage struct {
-	Orders   []Order `json:"orders"`
-	Total    int64   `json:"total"`
-	Page     int     `json:"page"`
-	PageSize int     `json:"pageSize"`
-}
+// [RC-12] OrderPage 已移除: 死代码, ListMyOrders 使用 []Order 直接返回
 
 // PayPayload 下单请求
 type PayPayload struct {

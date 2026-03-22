@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,12 +55,18 @@ func NewClient(cfg Config) (*Client, error) {
 
 	store := cfg.Store
 	if store == nil {
-		store = NewFileTokenStore("")
+		var storeErr error
+		store, storeErr = NewFileTokenStore("")
+		if storeErr != nil {
+			return nil, fmt.Errorf("init token store: %w", storeErr)
+		}
 	}
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		// [RC-3] 不设全局 Timeout — 全局 Timeout 含 body 读取,
+		// 会截断 SSE 流式聊天和大文件下载。改为 per-request context timeout。
+		httpClient = &http.Client{}
 	}
 
 	c := &Client{
@@ -96,7 +103,10 @@ func (c *Client) Login(ctx context.Context, appName string, scopes []string) err
 	if err != nil {
 		return fmt.Errorf("discovery failed: %w", err)
 	}
+	// [RC-5] 持锁写入 c.meta, 防止与 ensureToken/forceRefresh 读取产生数据竞争
+	c.mu.Lock()
 	c.meta = meta
+	c.mu.Unlock()
 
 	// 2. 检查是否已有 client_id
 	c.mu.RLock()
@@ -140,16 +150,29 @@ func (c *Client) Login(ctx context.Context, appName string, scopes []string) err
 }
 
 // Logout 吊销 token 并清除本地存储
+// [RC-4] meta==nil 时先 Discover 获取 revocation endpoint, 确保服务端 token 也被撤销
 func (c *Client) Logout(ctx context.Context) error {
 	c.mu.Lock()
 	tokens := c.tokens
 	meta := c.meta
 	c.tokens = nil
+	c.meta = nil
 	c.mu.Unlock()
 
-	if tokens != nil && meta != nil {
-		_ = RevokeToken(ctx, meta, tokens.AccessToken)
-		_ = RevokeToken(ctx, meta, tokens.RefreshToken)
+	if tokens != nil {
+		if meta == nil {
+			// Lazy discover for revocation endpoint
+			discovered, discErr := Discover(ctx, c.serverURL)
+			if discErr != nil {
+				fmt.Printf("[acosmi-sdk] warning: discover for revocation failed: %v\n", discErr)
+			} else {
+				meta = discovered
+			}
+		}
+		if meta != nil {
+			_ = RevokeToken(ctx, meta, tokens.AccessToken)
+			_ = RevokeToken(ctx, meta, tokens.RefreshToken)
+		}
 	}
 
 	return c.store.Clear()
@@ -227,14 +250,7 @@ func (c *Client) ListModels(ctx context.Context) ([]ManagedModel, error) {
 	return resp.Data, nil
 }
 
-// GetModelUsage 获取模型用量统计
-func (c *Client) GetModelUsage(ctx context.Context) (*ModelUsage, error) {
-	var resp APIResponse[ModelUsage]
-	if err := c.doJSON(ctx, http.MethodGet, "/managed-models/usage", nil, &resp, false); err != nil {
-		return nil, err
-	}
-	return &resp.Data, nil
-}
+// [RC-2] GetModelUsage 已移除: /managed-models/usage 端点已迁移至 tk-dist 营销系统
 
 // Chat 同步聊天 (适合短回复)
 func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*ChatResponse, error) {
@@ -569,7 +585,11 @@ func (c *Client) InstallSkill(ctx context.Context, skillID string) (*SkillStoreI
 // 有 token 时自动附带 (享受无限流), 无 token 时匿名 (受限流)
 // 返回 *RateLimitError 表示 429 限流
 // 根因修复 #5: 使用 LimitReader 限制下载体积为 50MB
+// [RC-3] 5 分钟超时 (大文件下载)
 func (c *Client) DownloadSkill(ctx context.Context, skillID string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
 	token, _ := c.ensureToken(ctx)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -631,26 +651,29 @@ func (c *Client) UploadSkill(ctx context.Context, zipData []byte, scope, intent 
 	return c.uploadSkillInternal(ctx, zipData, scope, intent, false)
 }
 
+// [RC-6] 使用 mime/multipart.Writer 生成随机 boundary, 防止 ZIP 内容碰撞
+// [RC-3] 5 分钟超时 (大文件上传)
 func (c *Client) uploadSkillInternal(ctx context.Context, zipData []byte, scope, intent string, retried bool) (*SkillStoreItem, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
 	token, err := c.ensureToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	var buf bytes.Buffer
-	boundary := "----AcosmiBoundary"
-	w := func(field, value string) {
-		buf.WriteString("--" + boundary + "\r\n")
-		buf.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"%s\"\r\n\r\n", field))
-		buf.WriteString(value + "\r\n")
+	writer := multipart.NewWriter(&buf)
+	_ = writer.WriteField("scope", scope)
+	_ = writer.WriteField("intent", intent)
+	part, err := writer.CreateFormFile("file", "skill.zip")
+	if err != nil {
+		return nil, fmt.Errorf("create form file: %w", err)
 	}
-	w("scope", scope)
-	w("intent", intent)
-	buf.WriteString("--" + boundary + "\r\n")
-	buf.WriteString("Content-Disposition: form-data; name=\"file\"; filename=\"skill.zip\"\r\n")
-	buf.WriteString("Content-Type: application/zip\r\n\r\n")
-	buf.Write(zipData)
-	buf.WriteString("\r\n--" + boundary + "--\r\n")
+	if _, err := part.Write(zipData); err != nil {
+		return nil, fmt.Errorf("write zip data: %w", err)
+	}
+	writer.Close()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.apiURL("/skill-store/upload"), &buf)
@@ -658,7 +681,7 @@ func (c *Client) uploadSkillInternal(ctx context.Context, zipData []byte, scope,
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -778,7 +801,11 @@ func (c *Client) apiURL(path string) string {
 }
 
 // 根因修复 #3: doJSON 增加 retried 参数, 401 重试只允许一次, 防无限递归栈溢出
+// [RC-3] per-request 30s 超时 (替代全局 http.Client.Timeout)
 func (c *Client) doJSON(ctx context.Context, method, path string, body interface{}, result interface{}, retried bool) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	token, err := c.ensureToken(ctx)
 	if err != nil {
 		return err
@@ -833,7 +860,11 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body interface
 // doPublicJSON 公共端点请求
 // 有 token 时自动附带 (享受认证用户待遇), 无 token 时匿名请求
 // 不做 401 重试 (公共端点不应要求认证)
+// [RC-3] per-request 30s 超时
 func (c *Client) doPublicJSON(ctx context.Context, method, path string, body interface{}, result interface{}) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	token, _ := c.ensureToken(ctx)
 
 	var bodyReader io.Reader

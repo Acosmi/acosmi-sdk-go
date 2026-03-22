@@ -25,3 +25,11 @@ go.work
 
 # Token files (never commit secrets)
 desktop-tokens.json
+
+# Build outputs
+bin/
+dist/
+crabclaw-skill
+
+# macOS nested
+**/.DS_Store
