@@ -23,9 +23,17 @@ var authHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // ---------- Discovery ----------
 
-// Discover 从 well-known 端点获取 OAuth 服务元数据
+// Discover 从 well-known 端点获取 Desktop OAuth 服务元数据。
+// serverURL 可能含路径 (如 "https://acosmi.ai/api/v4")，
+// well-known 端点按 RFC 8414 必须在 origin 根路径:
+//   https://acosmi.ai/.well-known/oauth-authorization-server/desktop
 func Discover(ctx context.Context, serverURL string) (*ServerMetadata, error) {
-	endpoint := strings.TrimRight(serverURL, "/") + "/.well-known/oauth-authorization-server/desktop"
+	parsed, err := url.Parse(strings.TrimRight(serverURL, "/"))
+	if err != nil {
+		return nil, fmt.Errorf("discover: invalid server URL: %w", err)
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	endpoint := origin + "/.well-known/oauth-authorization-server/desktop"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
