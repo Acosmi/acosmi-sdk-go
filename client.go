@@ -498,7 +498,7 @@ func (c *Client) GetWalletTransactions(ctx context.Context) ([]Transaction, erro
 // ============================================================================
 
 // BrowseSkillStore 浏览技能商店 (公共端点, 无需认证)
-// 便捷方法: 等价于 BrowseSkills(ctx, 1, 50, query.Category, query.Keyword, query.Tag)
+// 便捷方法: 等价于 BrowseSkills(ctx, 1, 50, query.Category, query.Keyword, query.Tag, "")
 func (c *Client) BrowseSkillStore(ctx context.Context, query SkillStoreQuery) ([]SkillStoreItem, error) {
 	resp, err := c.BrowseSkills(ctx, 1, 50, query.Category, query.Keyword, query.Tag, "")
 	if err != nil {
