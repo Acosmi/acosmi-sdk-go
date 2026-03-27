@@ -255,6 +255,7 @@ type SkillStoreItem struct {
 	UpdatedAt           string  `json:"updatedAt"`
 	Visibility          string  `json:"visibility,omitempty"`
 	CertificationStatus string  `json:"certificationStatus,omitempty"`
+	Source              string  `json:"source,omitempty"`
 }
 
 // SkillStoreQuery 技能商店搜索参数
@@ -295,6 +296,7 @@ type SkillStoreListItem struct {
 	Tags                []string `json:"tags"`
 	CertificationStatus string   `json:"certificationStatus,omitempty"`
 	Visibility          string   `json:"visibility,omitempty"`
+	Source              string   `json:"source,omitempty"`
 	UpdatedAt           string   `json:"updatedAt"`
 }
 

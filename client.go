@@ -500,7 +500,7 @@ func (c *Client) GetWalletTransactions(ctx context.Context) ([]Transaction, erro
 // BrowseSkillStore 浏览技能商店 (公共端点, 无需认证)
 // 便捷方法: 等价于 BrowseSkills(ctx, 1, 50, query.Category, query.Keyword, query.Tag)
 func (c *Client) BrowseSkillStore(ctx context.Context, query SkillStoreQuery) ([]SkillStoreItem, error) {
-	resp, err := c.BrowseSkills(ctx, 1, 50, query.Category, query.Keyword, query.Tag)
+	resp, err := c.BrowseSkills(ctx, 1, 50, query.Category, query.Keyword, query.Tag, "")
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +508,7 @@ func (c *Client) BrowseSkillStore(ctx context.Context, query SkillStoreQuery) ([
 }
 
 // BrowseSkills 浏览公共技能商店 (V3 分页接口, 公共端点, 无需认证)
-func (c *Client) BrowseSkills(ctx context.Context, page, pageSize int, category, keyword, tag string) (*SkillBrowseResponse, error) {
+func (c *Client) BrowseSkills(ctx context.Context, page, pageSize int, category, keyword, tag, source string) (*SkillBrowseResponse, error) {
 	qv := url.Values{}
 	qv.Set("page", fmt.Sprintf("%d", page))
 	qv.Set("pageSize", fmt.Sprintf("%d", pageSize))
@@ -520,6 +520,9 @@ func (c *Client) BrowseSkills(ctx context.Context, page, pageSize int, category,
 	}
 	if tag != "" {
 		qv.Set("tag", tag)
+	}
+	if source != "" {
+		qv.Set("source", source)
 	}
 
 	var resp APIResponse[SkillBrowseResponse]
@@ -532,7 +535,7 @@ func (c *Client) BrowseSkills(ctx context.Context, page, pageSize int, category,
 // BrowseSkillsList 轻量浏览公共技能商店（仅返回标题、简介等展示字段）
 // 等价于 BrowseSkills + fields=minimal，响应体积缩减 90%+
 func (c *Client) BrowseSkillsList(ctx context.Context, page, pageSize int,
-	category, keyword, tag string) (*SkillBrowseListResponse, error) {
+	category, keyword, tag, source string) (*SkillBrowseListResponse, error) {
 	qv := url.Values{}
 	qv.Set("page", fmt.Sprintf("%d", page))
 	qv.Set("pageSize", fmt.Sprintf("%d", pageSize))
@@ -545,6 +548,9 @@ func (c *Client) BrowseSkillsList(ctx context.Context, page, pageSize int,
 	}
 	if tag != "" {
 		qv.Set("tag", tag)
+	}
+	if source != "" {
+		qv.Set("source", source)
 	}
 
 	var resp APIResponse[SkillBrowseListResponse]
