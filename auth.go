@@ -167,11 +167,21 @@ func Authorize(ctx context.Context, meta *ServerMetadata, clientID string, scope
 			}
 			errCh <- fmt.Errorf("authorization denied: %s", errMsg)
 			// 根因修复 #8: XSS — 使用 html.EscapeString 转义用户输入
-			fmt.Fprintf(w, "<html><body><h2>授权失败</h2><p>%s</p><p>可以关闭此窗口。</p></body></html>", html.EscapeString(errMsg))
+			fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>授权失败</title></head>`+
+				`<body style="font-family:system-ui,sans-serif;text-align:center;padding:60px 20px">`+
+				`<h2>授权失败</h2><p>%s</p>`+
+				`<p style="color:#888;font-size:14px">可以关闭此窗口。</p>`+
+				`</body></html>`, html.EscapeString(errMsg))
 			return
 		}
 		codeCh <- code
-		fmt.Fprint(w, "<html><body><h2>授权成功</h2><p>已完成身份认证，可以关闭此窗口。</p></body></html>")
+		fmt.Fprint(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>授权成功 - Crab Claw</title></head>`+
+			`<body style="font-family:system-ui,sans-serif;text-align:center;padding:60px 20px">`+
+			`<h2>授权成功</h2>`+
+			`<p>已完成身份认证，请返回 Crab Claw 应用继续使用。</p>`+
+			`<p style="color:#888;font-size:14px">此窗口将在 3 秒后自动关闭…</p>`+
+			`<script>setTimeout(function(){window.close()},3000)</script>`+
+			`</body></html>`)
 	})
 
 	server := &http.Server{Handler: mux}
