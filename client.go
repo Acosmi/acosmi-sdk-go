@@ -37,7 +37,9 @@ type Client struct {
 
 // Config 客户端配置
 type Config struct {
-	// ServerURL nexus-v4 API 根地址，如 http://127.0.0.1:8009 或 http://127.0.0.1:3300/api/v4
+	// ServerURL nexus-v4 API 根地址。
+	// 生产环境: https://acosmi.ai  (SDK 自动追加 /api/v4)
+	// 本地开发: http://127.0.0.1:3300
 	ServerURL string
 
 	// Store token 持久化实现，nil 则使用默认文件存储 (~/.acosmi/tokens.json)

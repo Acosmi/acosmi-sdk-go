@@ -20,7 +20,7 @@ func defaultConfig() CLIConfig {
 		home = "."
 	}
 	return CLIConfig{
-		ServerURL: "http://127.0.0.1:3300",
+		ServerURL: "https://acosmi.ai",
 		SkillDir:  filepath.Join(home, ".acosmi", "skills"),
 	}
 }
