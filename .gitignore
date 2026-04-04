@@ -27,9 +27,10 @@ go.work
 desktop-tokens.json
 
 # Build outputs
-bin/
+/bin/
 dist/
 crabclaw-skill
+/crabclawskill
 
 # macOS nested
 **/.DS_Store

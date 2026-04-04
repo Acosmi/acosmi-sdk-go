@@ -2,6 +2,7 @@ package acosmi
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -406,6 +407,34 @@ type RateLimitError struct {
 
 func (e *RateLimitError) Error() string { return e.Message }
 
+// BusinessError API 业务层错误 (HTTP 200 但 code != 0)
+// tk-dist 代理透传 yudao 响应, HTTP 状态码为 200, 业务错误在 JSON code 字段
+// 调用方可用 errors.As 提取: var bizErr *acosmi.BusinessError
+type BusinessError struct {
+	Code    int
+	Message string
+}
+
+func (e *BusinessError) Error() string {
+	return fmt.Sprintf("API error (code=%d): %s", e.Code, e.Message)
+}
+
+// OrderTerminalError 订单到达非成功终态 (FAILED/CANCELLED/CLOSED/EXPIRED/REFUNDED)
+// WaitForPayment 在订单终态为非成功时返回此错误
+type OrderTerminalError struct {
+	OrderID string
+	Status  string
+}
+
+func (e *OrderTerminalError) Error() string {
+	return fmt.Sprintf("order %s terminated: %s", e.OrderID, e.Status)
+}
+
+// businessCodeChecker 内部接口, doJSON/doPublicJSON 解码后检查业务错误码
+type businessCodeChecker interface {
+	businessError() error
+}
+
 // ---------- API Response Wrapper ----------
 
 // APIResponse nexus-v4 标准响应
@@ -423,6 +452,16 @@ func (r *APIResponse[T]) GetMessage() string {
 		return r.Message
 	}
 	return r.Msg
+}
+
+// businessError 检查业务层错误码 (实现 businessCodeChecker 接口)
+// tk-dist 代理返回 HTTP 200 + {code: 500, msg: "余额不足"} 时,
+// 此方法将其转换为 *BusinessError, 防止调用方收到零值数据+nil错误
+func (r *APIResponse[T]) businessError() error {
+	if r.Code != 0 {
+		return &BusinessError{Code: r.Code, Message: r.GetMessage()}
+	}
+	return nil
 }
 
 // YudaoPageResult yudao 分页响应格式 (tk-dist 代理透传)

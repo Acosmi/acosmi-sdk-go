@@ -37,9 +37,9 @@ type Client struct {
 
 // Config 客户端配置
 type Config struct {
-	// ServerURL nexus-v4 API 根地址。
-	// 生产环境: https://acosmi.ai  (SDK 自动追加 /api/v4)
-	// 本地开发: http://127.0.0.1:3300
+	// ServerURL nexus-v4 API 根地址 (默认 https://acosmi.ai)。
+	// SDK 自动追加 /api/v4, 无需手动拼接。
+	// 本地开发覆盖: http://127.0.0.1:3300
 	ServerURL string
 
 	// Store token 持久化实现，nil 则使用默认文件存储 (~/.acosmi/tokens.json)
@@ -52,7 +52,7 @@ type Config struct {
 // NewClient 创建客户端 (自动加载已保存的 token)
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.ServerURL == "" {
-		return nil, fmt.Errorf("ServerURL is required")
+		cfg.ServerURL = "https://acosmi.ai"
 	}
 
 	store := cfg.Store
@@ -258,7 +258,7 @@ func (c *Client) ListModels(ctx context.Context) ([]ManagedModel, error) {
 func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
 	var resp ChatResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/managed-models/"+modelID+"/chat", req, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/chat", req, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -296,7 +296,7 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.apiURL("/managed-models/"+modelID+"/chat"),
+		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/chat"),
 		bytes.NewReader(body))
 	if err != nil {
 		errCh <- err
@@ -425,7 +425,7 @@ func (c *Client) ListTokenPackages(ctx context.Context) ([]TokenPackage, error) 
 // GetTokenPackageDetail 获取流量包详情
 func (c *Client) GetTokenPackageDetail(ctx context.Context, packageID string) (*TokenPackage, error) {
 	var resp APIResponse[TokenPackage]
-	if err := c.doJSON(ctx, http.MethodGet, "/token-packages/"+packageID, nil, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/token-packages/"+url.PathEscape(packageID), nil, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -438,7 +438,7 @@ func (c *Client) BuyTokenPackage(ctx context.Context, packageID string, payload 
 		body = payload
 	}
 	var resp APIResponse[Order]
-	if err := c.doJSON(ctx, http.MethodPost, "/token-packages/"+packageID+"/buy", body, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/token-packages/"+url.PathEscape(packageID)+"/buy", body, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -447,7 +447,7 @@ func (c *Client) BuyTokenPackage(ctx context.Context, packageID string, payload 
 // GetOrderStatus 查询订单支付状态
 func (c *Client) GetOrderStatus(ctx context.Context, orderID string) (*OrderStatus, error) {
 	var resp APIResponse[OrderStatus]
-	if err := c.doJSON(ctx, http.MethodGet, "/token-packages/orders/"+orderID+"/status", nil, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/token-packages/orders/"+url.PathEscape(orderID)+"/status", nil, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -471,6 +471,62 @@ func (c *Client) ListMyOrders(ctx context.Context) ([]Order, error) {
 		return nil, fmt.Errorf("decode orders: %w", err)
 	}
 	return orders, nil
+}
+
+// WaitForPayment 轮询订单支付状态直到终态
+// 成功支付返回 (status, nil); 终态失败返回 (status, *OrderTerminalError)
+// context 超时/取消返回 (nil, ctx.Err())
+// pollInterval <= 0 时默认 2 秒
+//
+// 购买链路典型用法:
+//
+//	order, _ := client.BuyTokenPackage(ctx, pkgID, nil)
+//	// 用户在 order.PayURL 完成支付 ...
+//	status, err := client.WaitForPayment(ctx, order.ID, 3*time.Second)
+func (c *Client) WaitForPayment(ctx context.Context, orderID string, pollInterval time.Duration) (*OrderStatus, error) {
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		status, err := c.GetOrderStatus(ctx, orderID)
+		if err != nil {
+			return nil, err
+		}
+
+		if isOrderTerminal(status.Status) {
+			if isOrderSuccess(status.Status) {
+				return status, nil
+			}
+			return status, &OrderTerminalError{OrderID: orderID, Status: status.Status}
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func isOrderSuccess(status string) bool {
+	switch status {
+	case "PAID", "SUCCESS", "COMPLETED":
+		return true
+	}
+	return false
+}
+
+func isOrderTerminal(status string) bool {
+	switch status {
+	case "PAID", "SUCCESS", "COMPLETED",
+		"FAILED", "CANCELLED", "CLOSED", "EXPIRED", "REFUNDED":
+		return true
+	}
+	return false
 }
 
 // ============================================================================
@@ -565,7 +621,7 @@ func (c *Client) BrowseSkillsList(ctx context.Context, page, pageSize int,
 // GetSkillDetail 获取技能商店中某个技能的详情 (公共端点)
 func (c *Client) GetSkillDetail(ctx context.Context, skillID string) (*SkillStoreItem, error) {
 	var resp APIResponse[SkillStoreItem]
-	if err := c.doPublicJSON(ctx, http.MethodGet, "/skill-store/"+skillID, nil, &resp); err != nil {
+	if err := c.doPublicJSON(ctx, http.MethodGet, "/skill-store/"+url.PathEscape(skillID), nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -574,7 +630,7 @@ func (c *Client) GetSkillDetail(ctx context.Context, skillID string) (*SkillStor
 // ResolveSkill 按 key 精确查找公共技能 (公共端点)
 func (c *Client) ResolveSkill(ctx context.Context, key string) (*SkillStoreItem, error) {
 	var resp APIResponse[SkillStoreItem]
-	if err := c.doPublicJSON(ctx, http.MethodGet, "/skill-store/resolve/"+key, nil, &resp); err != nil {
+	if err := c.doPublicJSON(ctx, http.MethodGet, "/skill-store/resolve/"+url.PathEscape(key), nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -583,7 +639,7 @@ func (c *Client) ResolveSkill(ctx context.Context, key string) (*SkillStoreItem,
 // InstallSkill 安装技能到当前用户的租户空间 (需 OAuth scope: skill_store)
 func (c *Client) InstallSkill(ctx context.Context, skillID string) (*SkillStoreItem, error) {
 	var resp APIResponse[SkillStoreItem]
-	if err := c.doJSON(ctx, http.MethodPost, "/skill-store/"+skillID+"/install", nil, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/skill-store/"+url.PathEscape(skillID)+"/install", nil, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -601,7 +657,7 @@ func (c *Client) DownloadSkill(ctx context.Context, skillID string) ([]byte, str
 	token, _ := c.ensureToken(ctx)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.apiURL("/skill-store/"+skillID+"/download"), nil)
+		c.apiURL("/skill-store/"+url.PathEscape(skillID)+"/download"), nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -733,13 +789,13 @@ func (c *Client) GetSkillSummary(ctx context.Context) (*SkillSummary, error) {
 
 // CertifySkill 触发技能认证管线 (异步)
 func (c *Client) CertifySkill(ctx context.Context, skillID string) error {
-	return c.doJSON(ctx, http.MethodPost, "/skill-store/"+skillID+"/certify", nil, nil, false)
+	return c.doJSON(ctx, http.MethodPost, "/skill-store/"+url.PathEscape(skillID)+"/certify", nil, nil, false)
 }
 
 // GetCertificationStatus 查询技能认证状态
 func (c *Client) GetCertificationStatus(ctx context.Context, skillID string) (*CertificationStatus, error) {
 	var resp APIResponse[CertificationStatus]
-	if err := c.doJSON(ctx, http.MethodGet, "/skill-store/"+skillID+"/certification", nil, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/skill-store/"+url.PathEscape(skillID)+"/certification", nil, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -789,7 +845,7 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolView, error) {
 // GetTool 获取单个工具详情
 func (c *Client) GetTool(ctx context.Context, toolID string) (*ToolView, error) {
 	var resp APIResponse[ToolView]
-	if err := c.doJSON(ctx, http.MethodGet, "/tools/"+toolID, nil, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/tools/"+url.PathEscape(toolID), nil, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -861,6 +917,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body interface
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
+		// 根因修复 #16: 检查业务层错误码
+		// tk-dist 代理透传 HTTP 200 + {code: 500, msg: "余额不足"},
+		// 仅检查 HTTP 状态码会导致业务错误被静默吞掉, 调用方收到零值数据+nil错误
+		if checker, ok := result.(businessCodeChecker); ok {
+			if err := checker.businessError(); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -909,6 +973,12 @@ func (c *Client) doPublicJSON(ctx context.Context, method, path string, body int
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
+		}
+		// 根因修复 #16: 同 doJSON, 公共端点也需检查业务错误码
+		if checker, ok := result.(businessCodeChecker); ok {
+			if err := checker.businessError(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
