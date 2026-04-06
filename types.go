@@ -52,30 +52,160 @@ type ClientRegistration struct {
 
 // ManagedModel 托管模型
 type ManagedModel struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	Provider      string  `json:"provider"`
-	ModelID       string  `json:"modelId"`
-	MaxTokens     int     `json:"maxTokens"`
-	IsEnabled     bool    `json:"isEnabled"`
-	PricePerMTok  float64 `json:"pricePerMTok,omitempty"`
-	IsDefault     bool    `json:"isDefault,omitempty"`
-	ContextWindow int     `json:"contextWindow,omitempty"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Provider      string            `json:"provider"`
+	ModelID       string            `json:"modelId"`
+	MaxTokens     int               `json:"maxTokens"`
+	IsEnabled     bool              `json:"isEnabled"`
+	PricePerMTok  float64           `json:"pricePerMTok,omitempty"`
+	IsDefault     bool              `json:"isDefault,omitempty"`
+	ContextWindow int               `json:"contextWindow,omitempty"`
+	Capabilities  ModelCapabilities `json:"capabilities"` // 模型能力矩阵 (CrabCode 消费)
+}
+
+// ModelCapabilities 模型能力矩阵
+// 下游通过此结构决定 UI 功能开关和 Beta Header 注入
+type ModelCapabilities struct {
+	// 思考能力
+	SupportsThinking         bool `json:"supports_thinking"`
+	SupportsAdaptiveThinking bool `json:"supports_adaptive_thinking"`
+	SupportsISP              bool `json:"supports_isp"` // 交错思考 (Interleaved Thinking)
+
+	// 工具与搜索
+	SupportsWebSearch        bool `json:"supports_web_search"`
+	SupportsToolSearch       bool `json:"supports_tool_search"`
+	SupportsStructuredOutput bool `json:"supports_structured_output"`
+
+	// 推理控制
+	SupportsEffort   bool `json:"supports_effort"`
+	SupportsMaxEffort bool `json:"supports_max_effort"` // Opus 4.6 独有
+	SupportsFastMode bool `json:"supports_fast_mode"`   // Opus 4.6 独有
+
+	// 上下文与缓存
+	Supports1MContext    bool `json:"supports_1m_context"`
+	SupportsPromptCache  bool `json:"supports_prompt_cache"`
+	SupportsCacheEditing bool `json:"supports_cache_editing"` // 通过 context-management beta 控制
+
+	// 输出控制
+	SupportsTokenEfficient bool `json:"supports_token_efficient"` // Claude 4 内置
+	SupportsRedactThinking bool `json:"supports_redact_thinking"`
+
+	// Token 上限 (冗余但便于查询)
+	MaxInputTokens  int `json:"max_input_tokens"`
+	MaxOutputTokens int `json:"max_output_tokens"`
 }
 
 // [RC-2] ModelUsage 已移除: /managed-models/usage 端点已迁移至 tk-dist
 
-// ChatMessage 聊天消息
+// ChatMessage 聊天消息 (简单文本格式, CrabClaw 使用)
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
 // ChatRequest 聊天请求
+// 基础字段供 CrabClaw 使用, 扩展字段供 CrabCode 使用
+// 所有新增字段零值不改变行为 (向后兼容)
 type ChatRequest struct {
+	// ── 基础字段 (CrabClaw 兼容) ──
 	Messages  []ChatMessage `json:"messages"`
 	Stream    bool          `json:"stream,omitempty"`
 	MaxTokens int           `json:"max_tokens,omitempty"`
+
+	// ── 完整请求控制 (CrabCode 扩展) ──
+	// 以下字段全部 json:"-", 仅通过 buildChatRequest 序列化, 防止直接 json.Marshal 产生不完整输出
+	RawMessages interface{}            `json:"-"` // 复杂消息体 (含 content blocks / 多模态), 非 nil 时优先于 Messages
+	System      interface{}            `json:"-"` // string 或 []ContentBlock
+	Tools       interface{}            `json:"-"` // []Tool 标准工具定义
+	Temperature *float64               `json:"-"`
+	Thinking    *ThinkingConfig        `json:"-"` // 思考配置
+	Metadata    map[string]string      `json:"-"`
+	Betas       []string               `json:"-"` // 显式 beta (SDK 自动合并)
+	ServerTools []ServerTool           `json:"-"` // 服务端工具 (buildChatRequest 合入 tools 数组)
+	Speed       string                 `json:"-"` // "" | "fast" (Fast Mode)
+	Effort      *EffortConfig          `json:"-"` // 推理努力级别
+	OutputConfig *OutputConfig         `json:"-"` // 结构化输出配置
+	ExtraBody   map[string]interface{} `json:"-"` // 任意扩展字段 (buildChatRequest 合入请求体)
+}
+
+// ---------- Chat 扩展类型 ----------
+
+// ThinkingConfig 控制模型思考行为
+type ThinkingConfig struct {
+	Type         string `json:"type"`                    // "adaptive" | "enabled" | "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // type="enabled" 时的 token 预算
+	Display      string `json:"display,omitempty"`       // "none" | "summary" | "" (默认空=完整)
+}
+
+// ServerTool 定义服务端执行的工具
+// SDK 将这些工具 schema 合入 API 请求的 tools 数组
+type ServerTool struct {
+	Type   string                 `json:"type"`             // 工具类型标识
+	Name   string                 `json:"name"`             // 工具名称
+	Config map[string]interface{} `json:"config,omitempty"` // 工具特定配置
+}
+
+// Server Tool 类型常量
+const (
+	ServerToolTypeWebSearch = "web_search_20250305" // 联网搜索 (Brave Search)
+)
+
+// WebSearchConfig — ServerTool.Config 结构 (type=web_search_20250305)
+// 使用方式: ServerTool{Type: ServerToolTypeWebSearch, Name: "web_search", Config: WebSearchConfigToMap(cfg)}
+type WebSearchConfig struct {
+	MaxUses        int      `json:"max_uses,omitempty"`         // 每请求最大搜索次数, 默认 8
+	AllowedDomains []string `json:"allowed_domains,omitempty"`  // 域名白名单 (与 BlockedDomains 互斥)
+	BlockedDomains []string `json:"blocked_domains,omitempty"`  // 域名黑名单 (与 AllowedDomains 互斥)
+	UserLocation   *GeoLoc  `json:"user_location,omitempty"`    // 搜索地域偏好
+}
+
+// GeoLoc 地理位置
+type GeoLoc struct {
+	Country string `json:"country"` // ISO 3166-1 alpha-2
+	City    string `json:"city,omitempty"`
+}
+
+// EffortConfig 控制推理努力级别
+type EffortConfig struct {
+	Level string `json:"level"` // "low" | "medium" | "high" | "max" (max=Opus 4.6 only)
+}
+
+// OutputConfig 控制输出格式 (结构化输出)
+type OutputConfig struct {
+	Format string      `json:"format,omitempty"` // "json_schema" | ""
+	Schema interface{} `json:"schema,omitempty"` // JSON Schema 定义
+}
+
+// NewWebSearchTool 创建搜索 Server Tool 的便捷方法
+// AllowedDomains 与 BlockedDomains 互斥, 同时传入返回错误
+func NewWebSearchTool(cfg *WebSearchConfig) (ServerTool, error) {
+	st := ServerTool{
+		Type: ServerToolTypeWebSearch,
+		Name: "web_search",
+	}
+	if cfg != nil {
+		if len(cfg.AllowedDomains) > 0 && len(cfg.BlockedDomains) > 0 {
+			return st, fmt.Errorf("web search: allowed_domains and blocked_domains are mutually exclusive")
+		}
+		m := make(map[string]interface{})
+		if cfg.MaxUses > 0 {
+			m["max_uses"] = cfg.MaxUses
+		}
+		if len(cfg.AllowedDomains) > 0 {
+			m["allowed_domains"] = cfg.AllowedDomains
+		}
+		if len(cfg.BlockedDomains) > 0 {
+			m["blocked_domains"] = cfg.BlockedDomains
+		}
+		if cfg.UserLocation != nil {
+			m["user_location"] = cfg.UserLocation
+		}
+		if len(m) > 0 {
+			st.Config = m
+		}
+	}
+	return st, nil
 }
 
 // ChatResponse 同步聊天响应

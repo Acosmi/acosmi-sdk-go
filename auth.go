@@ -125,6 +125,87 @@ func codeChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
+// ---------- LoginWithHandler 事件模型 ----------
+
+// LoginEventType 登录事件类型
+type LoginEventType string
+
+const (
+	// EventAuthURL 授权 URL 已生成，调用方可展示/打开浏览器
+	EventAuthURL LoginEventType = "auth_url"
+	// EventComplete 登录完成
+	EventComplete LoginEventType = "complete"
+	// EventError 某步骤失败，附 ErrCode 分类码
+	EventError LoginEventType = "error"
+)
+
+// LoginErrCode 登录错误分类码
+type LoginErrCode string
+
+const (
+	ErrDiscovery     LoginErrCode = "discovery_failed"
+	ErrRegistration  LoginErrCode = "registration_failed"
+	ErrBrowserOpen   LoginErrCode = "browser_open_failed"
+	ErrAuthDenied    LoginErrCode = "auth_denied"
+	ErrTimeout       LoginErrCode = "auth_timeout"
+	ErrTokenExchange LoginErrCode = "token_exchange_failed"
+	ErrSSLProxy      LoginErrCode = "ssl_proxy_detected"
+)
+
+// LoginEvent 登录流程事件
+type LoginEvent struct {
+	Type    LoginEventType `json:"type"`
+	URL     string         `json:"url,omitempty"`
+	Error   string         `json:"error,omitempty"`
+	ErrCode LoginErrCode   `json:"err_code,omitempty"`
+}
+
+// LoginOption 登录选项（函数选项模式）
+type LoginOption func(*loginConfig)
+
+type loginConfig struct {
+	handler     func(LoginEvent)
+	skipBrowser bool
+	// 授权 URL 附加参数（审计 A-1 修复）
+	loginHint   string // login_hint — SSO email 预填
+	loginMethod string // login_method — 如 "sso"
+	orgUUID     string // orgUUID — 强制组织登录
+	expiresIn   int    // expires_in — 自定义 token 有效期（秒）
+}
+
+// WithSkipBrowser 跳过自动打开浏览器（由调用方控制浏览器）
+func WithSkipBrowser() LoginOption {
+	return func(cfg *loginConfig) { cfg.skipBrowser = true }
+}
+
+// WithLoginHint 设置 login_hint（SSO 场景下的 email 预填）
+func WithLoginHint(hint string) LoginOption {
+	return func(cfg *loginConfig) { cfg.loginHint = hint }
+}
+
+// WithLoginMethod 设置 login_method（如 "sso"）
+func WithLoginMethod(method string) LoginOption {
+	return func(cfg *loginConfig) { cfg.loginMethod = method }
+}
+
+// WithOrgUUID 设置 orgUUID（强制组织登录）
+func WithOrgUUID(uuid string) LoginOption {
+	return func(cfg *loginConfig) { cfg.orgUUID = uuid }
+}
+
+// WithExpiresIn 设置自定义 token 有效期（秒）
+func WithExpiresIn(seconds int) LoginOption {
+	return func(cfg *loginConfig) { cfg.expiresIn = seconds }
+}
+
+// isSSLError 检测 SSL/TLS 相关错误（企业代理 Zscaler 等）
+func isSSLError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "tls:") ||
+		strings.Contains(msg, "x509:") ||
+		strings.Contains(msg, "certificate")
+}
+
 // ---------- Authorization Code Flow ----------
 
 // AuthorizeResult 授权结果
@@ -138,7 +219,23 @@ type AuthorizeResult struct {
 //  2. 打开浏览器让用户登录并授权
 //  3. 接收回调拿到 authorization code
 //  4. 返回 code 供后续 token 交换
+//
+// 签名不变 — CrabClaw 零影响。内部委托 authorizeInternal。
 func Authorize(ctx context.Context, meta *ServerMetadata, clientID string, scopes []string) (*AuthorizeResult, string, error) {
+	return authorizeInternal(ctx, meta, clientID, scopes, nil)
+}
+
+// authorizeInternal 共享实现，接受 *loginConfig 以支持事件回调和 skipBrowser
+func authorizeInternal(ctx context.Context, meta *ServerMetadata, clientID string, scopes []string, cfg *loginConfig) (*AuthorizeResult, string, error) {
+	if cfg == nil {
+		cfg = &loginConfig{}
+	}
+	emit := func(e LoginEvent) {
+		if cfg.handler != nil {
+			cfg.handler(e)
+		}
+	}
+
 	// 生成 PKCE
 	verifier, err := generateCodeVerifier()
 	if err != nil {
@@ -175,10 +272,10 @@ func Authorize(ctx context.Context, meta *ServerMetadata, clientID string, scope
 			return
 		}
 		codeCh <- code
-		fmt.Fprint(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>授权成功 - Crab Claw</title></head>`+
+		fmt.Fprint(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>授权成功</title></head>`+
 			`<body style="font-family:system-ui,sans-serif;text-align:center;padding:60px 20px">`+
 			`<h2>授权成功</h2>`+
-			`<p>已完成身份认证，请返回 Crab Claw 应用继续使用。</p>`+
+			`<p>已完成身份认证，请返回应用继续使用。</p>`+
 			`<p style="color:#888;font-size:14px">此窗口将在 3 秒后自动关闭…</p>`+
 			`<script>setTimeout(function(){window.close()},3000)</script>`+
 			`</body></html>`)
@@ -186,8 +283,8 @@ func Authorize(ctx context.Context, meta *ServerMetadata, clientID string, scope
 
 	server := &http.Server{Handler: mux}
 	go func() {
-		if err := server.Serve(listener); err != http.ErrServerClosed {
-			errCh <- err
+		if srvErr := server.Serve(listener); srvErr != http.ErrServerClosed {
+			errCh <- srvErr
 		}
 	}()
 	defer server.Shutdown(context.Background())
@@ -206,19 +303,48 @@ func Authorize(ctx context.Context, meta *ServerMetadata, clientID string, scope
 	if len(scopes) > 0 {
 		q.Set("scope", strings.Join(scopes, " "))
 	}
+	// 审计 A-1 修复: 转发授权 URL 附加参数
+	if cfg.loginHint != "" {
+		q.Set("login_hint", cfg.loginHint)
+	}
+	if cfg.loginMethod != "" {
+		q.Set("login_method", cfg.loginMethod)
+	}
+	if cfg.orgUUID != "" {
+		q.Set("orgUUID", cfg.orgUUID)
+	}
 	authURL.RawQuery = q.Encode()
 
-	if err := openBrowser(authURL.String()); err != nil {
-		return nil, "", fmt.Errorf("open browser: %w (URL: %s)", err, authURL.String())
+	// 通知：授权 URL 就绪
+	emit(LoginEvent{Type: EventAuthURL, URL: authURL.String()})
+
+	// 打开浏览器（skipBrowser 时跳过）
+	if cfg.skipBrowser {
+		// 调用方控制浏览器，不自动打开
+	} else if browserErr := openBrowser(authURL.String()); browserErr != nil {
+		// 浏览器打不开不 return — 用户可通过 URL 手动打开
+		emit(LoginEvent{
+			Type:    EventError,
+			ErrCode: ErrBrowserOpen,
+			URL:     authURL.String(),
+			Error:   browserErr.Error(),
+		})
 	}
 
 	// 等待回调
 	select {
 	case code := <-codeCh:
 		return &AuthorizeResult{Code: code, RedirectURI: redirectURI}, verifier, nil
-	case err := <-errCh:
-		return nil, "", err
+	case authErr := <-errCh:
+		// 所有 errCh 错误均 emit 事件
+		if strings.Contains(authErr.Error(), "denied") {
+			emit(LoginEvent{Type: EventError, ErrCode: ErrAuthDenied, Error: authErr.Error()})
+		} else {
+			emit(LoginEvent{Type: EventError, ErrCode: ErrTokenExchange, Error: authErr.Error()})
+		}
+		return nil, "", authErr
 	case <-ctx.Done():
+		emit(LoginEvent{Type: EventError, ErrCode: ErrTimeout, Error: "authorization timed out"})
 		return nil, "", ctx.Err()
 	}
 }
@@ -233,6 +359,21 @@ func ExchangeCode(ctx context.Context, meta *ServerMetadata, clientID, code, red
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {codeVerifier},
+	}
+
+	return postToken(ctx, meta.TokenEndpoint, data)
+}
+
+// exchangeCodeWithExpiry 与 ExchangeCode 相同，但附带 expires_in 参数
+// 审计 A-2 修复: setup-token 模式需要自定义 token 有效期
+func exchangeCodeWithExpiry(ctx context.Context, meta *ServerMetadata, clientID, code, redirectURI, codeVerifier string, expiresIn int) (*TokenResponse, error) {
+	data := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {codeVerifier},
+		"expires_in":    {fmt.Sprintf("%d", expiresIn)},
 	}
 
 	return postToken(ctx, meta.TokenEndpoint, data)

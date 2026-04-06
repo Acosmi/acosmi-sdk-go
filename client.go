@@ -33,6 +33,10 @@ type Client struct {
 	http      *http.Client
 	mu        sync.RWMutex
 	ws        *wsState // WebSocket 长连接状态 (nil = 未连接)
+
+	// 模型能力缓存 (CrabCode 扩展)
+	modelCache     []ManagedModel // ListModels 缓存
+	modelCacheTime time.Time      // 缓存写入时间
 }
 
 // Config 客户端配置
@@ -99,10 +103,47 @@ func (c *Client) IsAuthorized() bool {
 // Login 完整授权流程: 发现 → 注册 → 授权 → 换 token → 持久化
 // appName: 桌面智能体名称 (如 "CrabClaw Desktop")
 // scopes: 请求的权限范围 (参考 AllScopes / ModelScopes / CommerceScopes 等预设)
+//
+// 签名不变 — CrabClaw 零影响。内部委托 loginInternal。
 func (c *Client) Login(ctx context.Context, appName string, scopes []string) error {
+	return c.loginInternal(ctx, appName, scopes, nil)
+}
+
+// LoginWithHandler 带事件回调的登录流程 — CrabCode 使用
+//
+// handler 在以下时刻被调用：
+//   - EventAuthURL:  授权 URL 已就绪，调用方可展示/打开浏览器
+//   - EventComplete: 登录成功，tokens 已持久化
+//   - EventError:    某步骤失败，附 ErrCode 分类码
+//
+// opts 可选：WithSkipBrowser() 控制是否跳过自动打开浏览器。
+// 当 handler 为 nil 时，行为与 Login() 完全一致。
+func (c *Client) LoginWithHandler(ctx context.Context, appName string, scopes []string, handler func(LoginEvent), opts ...LoginOption) error {
+	cfg := &loginConfig{handler: handler}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	return c.loginInternal(ctx, appName, scopes, cfg)
+}
+
+// loginInternal 共享实现
+func (c *Client) loginInternal(ctx context.Context, appName string, scopes []string, cfg *loginConfig) error {
+	if cfg == nil {
+		cfg = &loginConfig{}
+	}
+	emit := func(e LoginEvent) {
+		if cfg.handler != nil {
+			cfg.handler(e)
+		}
+	}
+	emitError := func(code LoginErrCode, err error) {
+		emit(LoginEvent{Type: EventError, ErrCode: code, Error: err.Error()})
+	}
+
 	// 1. 发现
 	meta, err := Discover(ctx, c.serverURL)
 	if err != nil {
+		emitError(ErrDiscovery, err)
 		return fmt.Errorf("discovery failed: %w", err)
 	}
 	// [RC-5] 持锁写入 c.meta, 防止与 ensureToken/forceRefresh 读取产生数据竞争
@@ -119,22 +160,34 @@ func (c *Client) Login(ctx context.Context, appName string, scopes []string) err
 	c.mu.RUnlock()
 
 	if clientID == "" {
-		reg, err := Register(ctx, meta, appName)
-		if err != nil {
-			return fmt.Errorf("registration failed: %w", err)
+		reg, regErr := Register(ctx, meta, appName)
+		if regErr != nil {
+			emitError(ErrRegistration, regErr)
+			return fmt.Errorf("registration failed: %w", regErr)
 		}
 		clientID = reg.ClientID
 	}
 
-	// 3. 授权 (打开浏览器)
-	result, verifier, err := Authorize(ctx, meta, clientID, scopes)
+	// 3. 授权 (PKCE + browser + callback)
+	result, verifier, err := authorizeInternal(ctx, meta, clientID, scopes, cfg)
 	if err != nil {
+		// authorizeInternal 内部已 emit 过具体错误事件
 		return fmt.Errorf("authorization failed: %w", err)
 	}
 
-	// 4. 换 token
-	tokenResp, err := ExchangeCode(ctx, meta, clientID, result.Code, result.RedirectURI, verifier)
+	// 4. 换 token（审计 A-2 修复: 支持自定义 expiresIn）
+	var tokenResp *TokenResponse
+	if cfg.expiresIn > 0 {
+		tokenResp, err = exchangeCodeWithExpiry(ctx, meta, clientID, result.Code, result.RedirectURI, verifier, cfg.expiresIn)
+	} else {
+		tokenResp, err = ExchangeCode(ctx, meta, clientID, result.Code, result.RedirectURI, verifier)
+	}
 	if err != nil {
+		code := ErrTokenExchange
+		if isSSLError(err) {
+			code = ErrSSLProxy
+		}
+		emitError(code, err)
 		return fmt.Errorf("token exchange failed: %w", err)
 	}
 
@@ -148,6 +201,8 @@ func (c *Client) Login(ctx context.Context, appName string, scopes []string) err
 		return fmt.Errorf("save tokens: %w", err)
 	}
 
+	// 6. 完成
+	emit(LoginEvent{Type: EventComplete})
 	return nil
 }
 
@@ -243,22 +298,154 @@ func (c *Client) ensureToken(ctx context.Context) (string, error) {
 // API: Managed Models (scope: models / models:chat)
 // ============================================================================
 
+// modelCacheTTL 模型列表缓存有效期
+const modelCacheTTL = 5 * time.Minute
+
 // ListModels 获取可用的托管模型列表
 func (c *Client) ListModels(ctx context.Context) ([]ManagedModel, error) {
 	var resp APIResponse[[]ManagedModel]
 	if err := c.doJSON(ctx, http.MethodGet, "/managed-models", nil, &resp, false); err != nil {
 		return nil, err
 	}
+	// 写入模型缓存 (供 getCachedCapabilities / GetModelCapabilities 使用)
+	c.mu.Lock()
+	c.modelCache = resp.Data
+	c.modelCacheTime = time.Now()
+	c.mu.Unlock()
 	return resp.Data, nil
+}
+
+// GetModelCapabilities 查询单个模型的能力矩阵
+// 优先从 ListModels 缓存读取, miss 时调用 ListModels 刷新
+func (c *Client) GetModelCapabilities(ctx context.Context, modelID string) (*ModelCapabilities, error) {
+	// 先尝试缓存
+	if caps, ok := c.getCachedCapabilities(modelID); ok {
+		return &caps, nil
+	}
+	// 缓存 miss: 刷新
+	if _, err := c.ListModels(ctx); err != nil {
+		return nil, fmt.Errorf("get model capabilities: %w", err)
+	}
+	if caps, ok := c.getCachedCapabilities(modelID); ok {
+		return &caps, nil
+	}
+	// 模型不在列表中, 返回零值
+	empty := ModelCapabilities{}
+	return &empty, nil
+}
+
+// getCachedCapabilities 从缓存中查找模型能力 (线程安全)
+func (c *Client) getCachedCapabilities(modelID string) (ModelCapabilities, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.modelCache == nil || time.Since(c.modelCacheTime) > modelCacheTTL {
+		return ModelCapabilities{}, false
+	}
+	for _, m := range c.modelCache {
+		if m.ID == modelID || m.ModelID == modelID {
+			return m.Capabilities, true
+		}
+	}
+	return ModelCapabilities{}, false
 }
 
 // [RC-2] GetModelUsage 已移除: /managed-models/usage 端点已迁移至 tk-dist 营销系统
 
+// buildChatRequest 构建完整的聊天请求体
+// 负责: ServerTools 合入 tools 数组 + ExtraBody 透传 + betas 自动组装
+// CrabClaw 简单调用 (仅 Messages/MaxTokens) 时, 此方法退化为简单序列化
+//
+// 注意: Beta 自动组装依赖模型能力缓存 (由 ListModels 填充)。
+// 如果 ListModels 从未被调用, 仅注入 claude-code-20250219 基础 beta。
+// CrabCode sdkadapter 启动时应先调用 ListModels() 填充缓存。
+func (c *Client) buildChatRequest(modelID string, req *ChatRequest) ([]byte, error) {
+	body := make(map[string]interface{})
+
+	// 消息: RawMessages 优先于 Messages
+	if req.RawMessages != nil {
+		body["messages"] = req.RawMessages
+	} else if len(req.Messages) > 0 {
+		body["messages"] = req.Messages
+	}
+
+	body["stream"] = req.Stream
+
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
+	if req.System != nil {
+		body["system"] = req.System
+	}
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
+	if req.Thinking != nil {
+		body["thinking"] = req.Thinking
+	}
+	if req.Metadata != nil {
+		body["metadata"] = req.Metadata
+	}
+
+	// ── 合入 Tools + ServerTools ──
+	var allTools []interface{}
+	if req.Tools != nil {
+		// Tools 可能是 []interface{} 或 []map 或其他切片类型
+		if toolsJSON, err := json.Marshal(req.Tools); err == nil {
+			var parsed []interface{}
+			if json.Unmarshal(toolsJSON, &parsed) == nil {
+				allTools = append(allTools, parsed...)
+			}
+		}
+	}
+	for _, st := range req.ServerTools {
+		schema := map[string]interface{}{
+			"type": st.Type,
+			"name": st.Name,
+		}
+		for k, v := range st.Config {
+			schema[k] = v
+		}
+		allTools = append(allTools, schema)
+	}
+	if len(allTools) > 0 {
+		body["tools"] = allTools
+	}
+
+	// ── 推理控制 ──
+	if req.Speed != "" {
+		body["speed"] = req.Speed
+	}
+	if req.Effort != nil {
+		body["effort"] = req.Effort
+	}
+	if req.OutputConfig != nil {
+		body["output_config"] = req.OutputConfig
+	}
+
+	// ── Beta 自动组装 ──
+	caps, _ := c.getCachedCapabilities(modelID)
+	betas := buildBetas(caps, req)
+	if len(betas) > 0 {
+		body["betas"] = betas
+	}
+
+	// ── 透传 ExtraBody ──
+	for k, v := range req.ExtraBody {
+		body[k] = v
+	}
+
+	return json.Marshal(body)
+}
+
 // Chat 同步聊天 (适合短回复)
 func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
+	body, err := c.buildChatRequest(modelID, &req)
+	if err != nil {
+		return nil, fmt.Errorf("build chat request: %w", err)
+	}
 	var resp ChatResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/chat", req, &resp, false); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/chat", json.RawMessage(body), &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -287,7 +474,11 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	eventCh chan<- StreamEvent, errCh chan<- error, retried bool) {
 
 	req.Stream = true
-	body, _ := json.Marshal(req)
+	body, buildErr := c.buildChatRequest(modelID, &req)
+	if buildErr != nil {
+		errCh <- buildErr
+		return
+	}
 
 	token, err := c.ensureToken(ctx)
 	if err != nil {
@@ -395,6 +586,16 @@ func (c *Client) ListConsumeRecords(ctx context.Context, page, pageSize int) (*C
 	path := fmt.Sprintf("/entitlements/consume-records?page=%d&pageSize=%d", page, pageSize)
 	var resp APIResponse[ConsumeRecordPage]
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp, false); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// ClaimMonthlyFree 领取当月免费额度
+// 幂等: 已领取时返回已有权益, 不重复发放
+func (c *Client) ClaimMonthlyFree(ctx context.Context) (*EntitlementItem, error) {
+	var resp APIResponse[EntitlementItem]
+	if err := c.doJSON(ctx, http.MethodPost, "/entitlements/claim-monthly", nil, &resp, false); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
