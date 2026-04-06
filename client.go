@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,16 @@ func (c *Client) IsAuthorized() bool {
 	return c.tokens != nil
 }
 
+// getCachedClientID 获取缓存的 client_id (来自上次登录)
+func (c *Client) getCachedClientID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.tokens != nil {
+		return c.tokens.ClientID
+	}
+	return ""
+}
+
 // Login 完整授权流程: 发现 → 注册 → 授权 → 换 token → 持久化
 // appName: 桌面智能体名称 (如 "CrabClaw Desktop")
 // scopes: 请求的权限范围 (参考 AllScopes / ModelScopes / CommerceScopes 等预设)
@@ -151,13 +162,8 @@ func (c *Client) loginInternal(ctx context.Context, appName string, scopes []str
 	c.meta = meta
 	c.mu.Unlock()
 
-	// 2. 检查是否已有 client_id
-	c.mu.RLock()
-	var clientID string
-	if c.tokens != nil {
-		clientID = c.tokens.ClientID
-	}
-	c.mu.RUnlock()
+	// 2. 检查是否已有 client_id; 无则注册
+	clientID := c.getCachedClientID()
 
 	if clientID == "" {
 		reg, regErr := Register(ctx, meta, appName)
@@ -171,8 +177,19 @@ func (c *Client) loginInternal(ctx context.Context, appName string, scopes []str
 	// 3. 授权 (PKCE + browser + callback)
 	result, verifier, err := authorizeInternal(ctx, meta, clientID, scopes, cfg)
 	if err != nil {
-		// authorizeInternal 内部已 emit 过具体错误事件
-		return fmt.Errorf("authorization failed: %w", err)
+		// 授权失败 (可能是服务器重启后 client_id 失效):
+		// 清除缓存的 client_id, 重新注册, 再试一次
+		reg, regErr := Register(ctx, meta, appName)
+		if regErr != nil {
+			emitError(ErrRegistration, regErr)
+			return fmt.Errorf("authorization failed (retry registration also failed): %w", err)
+		}
+		clientID = reg.ClientID
+
+		result, verifier, err = authorizeInternal(ctx, meta, clientID, scopes, cfg)
+		if err != nil {
+			return fmt.Errorf("authorization failed: %w", err)
+		}
 	}
 
 	// 4. 换 token（审计 A-2 修复: 支持自定义 expiresIn）
@@ -438,6 +455,7 @@ func (c *Client) buildChatRequest(modelID string, req *ChatRequest) ([]byte, err
 }
 
 // Chat 同步聊天 (适合短回复)
+// 响应的 TokenRemaining / CallRemaining 字段来自服务端 Header，反映结算后余额
 func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
 	body, err := c.buildChatRequest(modelID, &req)
@@ -445,8 +463,21 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 		return nil, fmt.Errorf("build chat request: %w", err)
 	}
 	var resp ChatResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/chat", json.RawMessage(body), &resp, false); err != nil {
+	resp.TokenRemaining = -1
+	resp.CallRemaining = -1
+	headers, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/chat", json.RawMessage(body), &resp)
+	if err != nil {
 		return nil, err
+	}
+	if v := headers.Get("X-Token-Remaining"); v != "" {
+		if n, parseErr := strconv.ParseInt(v, 10, 64); parseErr == nil {
+			resp.TokenRemaining = n
+		}
+	}
+	if v := headers.Get("X-Call-Remaining"); v != "" {
+		if n, parseErr := strconv.Atoi(v); parseErr == nil {
+			resp.CallRemaining = n
+		}
 	}
 	return &resp, nil
 }
@@ -543,6 +574,75 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	if err := scanner.Err(); err != nil {
 		errCh <- err
 	}
+}
+
+// ChatStreamWithUsage 流式聊天，自动解析结算事件
+// 返回内容事件 channel、结算结果 channel 和错误 channel
+// contentCh 只包含内容增量事件 (过滤掉 started/settled/failed)
+// settleCh 在流结束时发送结算信息 (包含 token 消耗和剩余余额)
+// errCh 报告传输错误或服务端 failed 事件
+func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req ChatRequest) (<-chan StreamEvent, <-chan StreamSettlement, <-chan error) {
+	rawCh, rawErrCh := c.ChatStream(ctx, modelID, req)
+	contentCh := make(chan StreamEvent, 32)
+	settleCh := make(chan StreamSettlement, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(contentCh)
+		defer close(settleCh)
+		defer close(errCh)
+
+		for ev := range rawCh {
+			// 结算事件 (settled / pending_settle)
+			if s := ParseSettlement(ev); s != nil {
+				select {
+				case settleCh <- *s:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			// 控制事件: 过滤
+			if ev.Event == "started" {
+				continue
+			}
+			// 失败事件: 解析错误信息发送到 errCh
+			if ev.Event == "failed" {
+				errMsg := parseStreamError(ev.Data)
+				select {
+				case errCh <- fmt.Errorf("stream failed: %s", errMsg):
+				case <-ctx.Done():
+				}
+				return
+			}
+			// 内容事件
+			select {
+			case contentCh <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := <-rawErrCh; err != nil {
+			errCh <- err
+		}
+	}()
+
+	return contentCh, settleCh, errCh
+}
+
+// parseStreamError 从 failed 事件 JSON 中提取错误描述
+func parseStreamError(data string) string {
+	var payload struct {
+		Error string `json:"error"`
+		Stage string `json:"stage"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return data // fallback: 原始数据
+	}
+	if payload.Stage != "" {
+		return payload.Stage + ": " + payload.Error
+	}
+	return payload.Error
 }
 
 // ============================================================================
@@ -1065,29 +1165,33 @@ func (c *Client) apiURL(path string) string {
 	return base + path
 }
 
-// 根因修复 #3: doJSON 增加 retried 参数, 401 重试只允许一次, 防无限递归栈溢出
-// [RC-3] per-request 30s 超时 (替代全局 http.Client.Timeout)
-func (c *Client) doJSON(ctx context.Context, method, path string, body interface{}, result interface{}, retried bool) error {
+// doJSONFull 与 doJSON 相同，但额外返回响应 Header (用于提取 X-Token-Remaining 等)
+func (c *Client) doJSONFull(ctx context.Context, method, path string, body interface{}, result interface{}) (http.Header, error) {
+	header, err := c.doJSONFullInternal(ctx, method, path, body, result, false)
+	return header, err
+}
+
+func (c *Client) doJSONFullInternal(ctx context.Context, method, path string, body interface{}, result interface{}, retried bool) (http.Header, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	token, err := c.ensureToken(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("marshal request: %w", err)
+			return nil, fmt.Errorf("marshal request: %w", err)
 		}
 		bodyReader = bytes.NewReader(data)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.apiURL(path), bodyReader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
@@ -1096,38 +1200,42 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body interface
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("request %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("request %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
-	// 根因修复 #3: retried 防止无限递归 (refresh 成功但服务端仍返 401 → 栈溢出)
 	if resp.StatusCode == http.StatusUnauthorized && !retried {
 		resp.Body.Close()
 		if refreshErr := c.forceRefresh(ctx); refreshErr != nil {
-			return fmt.Errorf("unauthorized and refresh failed: %w", refreshErr)
+			return nil, fmt.Errorf("unauthorized and refresh failed: %w", refreshErr)
 		}
-		return c.doJSON(ctx, method, path, body, result, true)
+		return c.doJSONFullInternal(ctx, method, path, body, result, true)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	if result != nil {
 		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-			return fmt.Errorf("decode response: %w", err)
+			return nil, fmt.Errorf("decode response: %w", err)
 		}
-		// 根因修复 #16: 检查业务层错误码
-		// tk-dist 代理透传 HTTP 200 + {code: 500, msg: "余额不足"},
-		// 仅检查 HTTP 状态码会导致业务错误被静默吞掉, 调用方收到零值数据+nil错误
 		if checker, ok := result.(businessCodeChecker); ok {
 			if err := checker.businessError(); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return nil
+	return resp.Header, nil
+}
+
+// 根因修复 #3: doJSON 增加 retried 参数, 401 重试只允许一次, 防无限递归栈溢出
+// [RC-3] per-request 30s 超时 (替代全局 http.Client.Timeout)
+// 委托到 doJSONFullInternal 消除代码重复
+func (c *Client) doJSON(ctx context.Context, method, path string, body interface{}, result interface{}, retried bool) error {
+	_, err := c.doJSONFullInternal(ctx, method, path, body, result, retried)
+	return err
 }
 
 // doPublicJSON 公共端点请求
