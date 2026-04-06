@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> 版本: v0.1.0 | 语言: Go 1.22+ | 许可证: MIT
+> 版本: v0.2.0 | 语言: Go 1.22+ | 许可证: MIT
 
 ---
 
@@ -20,6 +20,10 @@
   - [4.1 创建客户端](#41-创建客户端)
   - [4.2 授权生命周期](#42-授权生命周期)
   - [4.3 AI 模型服务](#43-ai-模型服务)
+  - [4.3.1 模型能力查询](#431-模型能力查询)
+  - [4.3.2 扩展聊天 (CrabCode)](#432-扩展聊天-crabcode)
+  - [4.3.3 联网搜索 (Server Tool)](#433-联网搜索-server-tool)
+  - [4.3.4 Beta Header 自动组装](#434-beta-header-自动组装)
   - [4.4 权益管理](#44-权益管理)
   - [4.5 流量包商城](#45-流量包商城)
   - [4.6 钱包](#46-钱包)
@@ -46,6 +50,7 @@
 - [6. 数据类型参考](#6-数据类型参考)
   - [6.1 OAuth 类型](#61-oauth-类型)
   - [6.2 模型类型](#62-模型类型)
+  - [6.2.1 Chat 扩展类型](#621-chat-扩展类型)
   - [6.3 权益类型](#63-权益类型)
   - [6.4 商城/订单类型](#64-商城订单类型)
   - [6.5 钱包类型](#65-钱包类型)
@@ -59,6 +64,7 @@
 - [9. 项目结构](#9-项目结构)
 - [10. 构建与发布](#10-构建与发布)
 - [11. 常见问题](#11-常见问题)
+- [12. 版本修订记录](#12-版本修订记录)
 
 ---
 
@@ -76,6 +82,9 @@ Acosmi Go SDK 是 Acosmi 平台的官方 Go 语言客户端库，提供两种使
 | OAuth 2.1 PKCE | 安全桌面授权流程，自动 token 刷新 |
 | 统一客户端 | 一个 `Client` 对象覆盖全域 API |
 | 流式聊天 | 基于 SSE (Server-Sent Events) 的实时对话 |
+| **Beta 自动组装** | 根据模型能力 + 请求参数自动注入 11 项 beta header (v0.2.0) |
+| **Server Tool** | 联网搜索等服务端工具，SDK 自动合入请求体 (v0.2.0) |
+| **模型能力查询** | `ModelCapabilities` 矩阵，16 项能力标记 (v0.2.0) |
 | WebSocket 长连接 | 实时接收余额/技能/系统推送，自动断线重连 |
 | 技能商店 | 浏览/搜索/下载/安装/上传/AI 生成 |
 | 线程安全 | 所有 API 调用均通过 `sync.RWMutex` 保护 |
@@ -446,6 +455,177 @@ if err := <-errCh; err != nil {
     log.Fatal(err)
 }
 ```
+
+#### 4.3.1 模型能力查询
+
+> v0.2.0 新增
+
+`ListModels()` 返回的 `ManagedModel` 包含 `Capabilities` 字段，描述模型支持的特性矩阵。下游应用可据此决定 UI 功能开关。
+
+```go
+models, _ := client.ListModels(ctx)
+for _, m := range models {
+    caps := m.Capabilities
+    fmt.Printf("模型: %s\n", m.Name)
+    fmt.Printf("  思考: %v | 1M上下文: %v | 搜索: %v | Fast: %v\n",
+        caps.SupportsThinking, caps.Supports1MContext,
+        caps.SupportsWebSearch, caps.SupportsFastMode)
+    fmt.Printf("  输入上限: %d | 输出上限: %d\n",
+        caps.MaxInputTokens, caps.MaxOutputTokens)
+}
+```
+
+也可以通过便捷方法查询单个模型的能力（内部复用 ListModels 缓存，5 分钟 TTL）:
+
+```go
+caps, err := client.GetModelCapabilities(ctx, "claude-opus-4-6")
+if caps.SupportsWebSearch {
+    // 显示搜索按钮
+}
+```
+
+> **重要**: `GetModelCapabilities` 和 `Chat/ChatStream` 的 Beta 自动组装均依赖模型缓存。建议在应用启动时调用一次 `ListModels()` 填充缓存。
+
+#### 4.3.2 扩展聊天 (CrabCode)
+
+> v0.2.0 新增
+
+`ChatRequest` 新增了多个扩展字段，供 CrabCode 等高级下游使用。所有扩展字段零值不改变行为，CrabClaw 等基础下游无需修改。
+
+```go
+resp, err := client.Chat(ctx, modelID, acosmi.ChatRequest{
+    // 基础字段 (同 v0.1.0)
+    Messages:  []acosmi.ChatMessage{{Role: "user", Content: "分析这段代码"}},
+    MaxTokens: 4096,
+
+    // 扩展: 复杂消息体 (多模态 content blocks)
+    // RawMessages 非 nil 时优先于 Messages
+    RawMessages: []map[string]interface{}{
+        {"role": "user", "content": []map[string]interface{}{
+            {"type": "text", "text": "描述这张图片"},
+            {"type": "image", "source": map[string]interface{}{
+                "type": "base64", "media_type": "image/png", "data": "iVBOR...",
+            }},
+        }},
+    },
+
+    // 扩展: 思考配置
+    Thinking: &acosmi.ThinkingConfig{
+        Type:         "enabled",
+        BudgetTokens: 8192,
+    },
+
+    // 扩展: 推理努力级别 (low/medium/high/max)
+    Effort: &acosmi.EffortConfig{Level: "high"},
+
+    // 扩展: Fast Mode (Opus 4.6)
+    Speed: "fast",
+
+    // 扩展: 结构化输出
+    OutputConfig: &acosmi.OutputConfig{
+        Format: "json_schema",
+        Schema: map[string]interface{}{
+            "type": "object",
+            "properties": map[string]interface{}{
+                "answer": map[string]string{"type": "string"},
+            },
+        },
+    },
+
+    // 扩展: 显式 Beta (SDK 自动合并，通常无需手动指定)
+    Betas: []string{"my-custom-beta-2026-01-01"},
+
+    // 扩展: 透传任意字段到请求体
+    ExtraBody: map[string]interface{}{
+        "custom_field": "custom_value",
+    },
+})
+```
+
+**扩展字段一览**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `RawMessages` | `interface{}` | 复杂消息体 (多模态)，非 nil 时优先于 Messages |
+| `System` | `interface{}` | 系统提示 (string 或 content blocks) |
+| `Tools` | `interface{}` | 标准工具定义 (与 ServerTools 合并) |
+| `Temperature` | `*float64` | 采样温度 |
+| `Thinking` | `*ThinkingConfig` | 思考配置 (adaptive/enabled/disabled) |
+| `Metadata` | `map[string]string` | 请求元数据 |
+| `Betas` | `[]string` | 显式 beta header (SDK 自动合并去重) |
+| `ServerTools` | `[]ServerTool` | 服务端工具 (搜索等) |
+| `Speed` | `string` | `""` 或 `"fast"` (Fast Mode) |
+| `Effort` | `*EffortConfig` | 推理努力级别 |
+| `OutputConfig` | `*OutputConfig` | 结构化输出配置 |
+| `ExtraBody` | `map[string]interface{}` | 透传任意字段 |
+
+> **设计说明**: 所有扩展字段标记为 `json:"-"`，仅通过内部 `buildChatRequest` 序列化，防止直接 `json.Marshal` 产生不完整输出。
+
+#### 4.3.3 联网搜索 (Server Tool)
+
+> v0.2.0 新增
+
+联网搜索通过 Server Tool 模式工作 — SDK 将搜索工具合入请求体的 `tools` 数组，平台端执行搜索并以 `web_search_tool_result` 流事件返回结果。
+
+```go
+// 创建搜索工具 (带配置)
+searchTool, err := acosmi.NewWebSearchTool(&acosmi.WebSearchConfig{
+    MaxUses:        5,                      // 每请求最多搜索 5 次
+    AllowedDomains: []string{"golang.org"}, // 仅搜索 golang.org
+    UserLocation:   &acosmi.GeoLoc{Country: "CN"},
+})
+if err != nil {
+    log.Fatal(err) // AllowedDomains 和 BlockedDomains 互斥
+}
+
+// 创建搜索工具 (默认配置)
+defaultSearch, _ := acosmi.NewWebSearchTool(nil)
+
+// 发起带搜索的聊天
+eventCh, errCh := client.ChatStream(ctx, modelID, acosmi.ChatRequest{
+    Messages:    []acosmi.ChatMessage{{Role: "user", Content: "Go 1.23 有什么新特性？"}},
+    ServerTools: []acosmi.ServerTool{searchTool},
+    MaxTokens:   4096,
+})
+
+for event := range eventCh {
+    // event.Data 中可能包含 web_search_tool_result 类型的 content block
+    // 下游自行解析搜索结果
+    fmt.Println(event.Data)
+}
+```
+
+**预定义常量**:
+
+```go
+acosmi.ServerToolTypeWebSearch  // "web_search_20250305" — 联网搜索 (Brave Search)
+```
+
+#### 4.3.4 Beta Header 自动组装
+
+> v0.2.0 新增
+
+SDK 在每次 `Chat` / `ChatStream` 调用时，根据模型能力矩阵和请求参数自动注入适用的 Beta Header。下游无需手动管理。
+
+**自动注入规则** (11 项真实 beta，经联网验证):
+
+| Beta Header | 注入条件 |
+|---|---|
+| `claude-code-20250219` | 始终 |
+| `interleaved-thinking-2025-05-14` | 模型支持 ISP |
+| `context-management-2025-06-27` | 模型支持 ISP |
+| `context-1m-2025-08-07` | 模型支持 1M 上下文 |
+| `structured-outputs-2025-11-13` | 模型支持 + `OutputConfig` 非 nil |
+| `token-efficient-tools-2025-02-19` | 模型支持 + `OutputConfig` 为 nil (与 structured-outputs 互斥) |
+| `advanced-tool-use-2025-11-20` | 模型支持 Tool Search |
+| `effort-2025-11-24` | 模型支持 + `Effort` 非 nil |
+| `fast-mode-2026-02-01` | 模型支持 + `Speed == "fast"` |
+| `prompt-caching-scope-2026-01-05` | 模型支持 Prompt Cache |
+| `redact-thinking-2026-02-12` | 模型支持 + `Thinking.Display == "summary"` |
+
+**互斥规则**: `structured-outputs` 与 `token-efficient-tools` 互斥，API 拒绝同时存在。SDK 自动处理。
+
+**客户端显式 beta**: 通过 `ChatRequest.Betas` 传入的 beta 会与自动注入的合并去重。
 
 ### 4.4 权益管理
 
@@ -818,6 +998,26 @@ client.Disconnect()
 - 30 秒握手超时
 - 通过 context 取消控制生命周期
 
+#### system 主题通知类型 (13 种)
+
+通过 `"system"` 主题接收的通知 `WSEvent.Data` 包含以下类型:
+
+| 类型常量 | 标题 | 触发场景 |
+|---------|------|---------|
+| `task_done` | 任务执行完成 | 异步任务/工作流完成 |
+| `task_confirm` | 任务计划待确认 | 异步任务需用户确认 |
+| `invite_success` | 邀请好友成功 | 邀请的好友注册成功 |
+| `commission` | 佣金收入到账 | 代理佣金结算入账 |
+| `register` | 欢迎加入 Acosmi | 新用户注册欢迎 |
+| `entitlement` | 权益到账通知 | 管理员手动发放权益 |
+| `entitlement_exp` | 权益即将到期 | 权益 7 天内到期 (每日 09:00 扫描) |
+| `purchase` | 购买成功 | 商城订单支付完成 |
+| `tk_alert` | TK 余额不足提醒 | 余额低于 100 TK (每日 10:00 扫描) |
+| `withdraw` | 提现成功 | 提现审批通过并打款 |
+| `reg_bonus` | 注册奖励到账 | 注册赠送权益发放完成 |
+| `claim_monthly` | 免费权益领取成功 | 月度免费 Token 领取成功 |
+| `unclaimed_reminder` | 您有免费权益待领取 | 当月未领取免费权益 (每日 11:00 扫描) |
+
 ---
 
 ## 5. CrabClaw-Skill CLI 命令手册
@@ -1129,15 +1329,39 @@ func (t *TokenSet) IsExpired() bool
 
 ```go
 type ManagedModel struct {
-    ID            string  `json:"id"`
-    Name          string  `json:"name"`
-    Provider      string  `json:"provider"`        // 如 "openai", "anthropic"
-    ModelID       string  `json:"modelId"`          // 如 "gpt-4o", "claude-3-opus"
-    MaxTokens     int     `json:"maxTokens"`
-    IsEnabled     bool    `json:"isEnabled"`
-    PricePerMTok  float64 `json:"pricePerMTok"`     // 每百万 Token 价格
-    IsDefault     bool    `json:"isDefault"`
-    ContextWindow int     `json:"contextWindow"`
+    ID            string            `json:"id"`
+    Name          string            `json:"name"`
+    Provider      string            `json:"provider"`        // 如 "openai", "anthropic"
+    ModelID       string            `json:"modelId"`          // 如 "gpt-4o", "claude-opus-4-6"
+    MaxTokens     int               `json:"maxTokens"`
+    IsEnabled     bool              `json:"isEnabled"`
+    PricePerMTok  float64           `json:"pricePerMTok"`     // 每百万 Token 价格
+    IsDefault     bool              `json:"isDefault"`
+    ContextWindow int               `json:"contextWindow"`
+    Capabilities  ModelCapabilities `json:"capabilities"`     // v0.2.0: 模型能力矩阵
+}
+```
+
+#### ModelCapabilities (v0.2.0)
+
+```go
+type ModelCapabilities struct {
+    SupportsThinking         bool `json:"supports_thinking"`
+    SupportsAdaptiveThinking bool `json:"supports_adaptive_thinking"`
+    SupportsISP              bool `json:"supports_isp"`              // 交错思考
+    SupportsWebSearch        bool `json:"supports_web_search"`
+    SupportsToolSearch       bool `json:"supports_tool_search"`
+    SupportsStructuredOutput bool `json:"supports_structured_output"`
+    SupportsEffort           bool `json:"supports_effort"`
+    SupportsMaxEffort        bool `json:"supports_max_effort"`       // Opus 4.6 独有
+    SupportsFastMode         bool `json:"supports_fast_mode"`        // Opus 4.6 独有
+    Supports1MContext        bool `json:"supports_1m_context"`
+    SupportsPromptCache      bool `json:"supports_prompt_cache"`
+    SupportsCacheEditing     bool `json:"supports_cache_editing"`
+    SupportsTokenEfficient   bool `json:"supports_token_efficient"`
+    SupportsRedactThinking   bool `json:"supports_redact_thinking"`
+    MaxInputTokens           int  `json:"max_input_tokens"`
+    MaxOutputTokens          int  `json:"max_output_tokens"`
 }
 ```
 
@@ -1150,9 +1374,24 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
+    // ── 基础字段 (v0.1.0, CrabClaw 兼容) ──
     Messages  []ChatMessage `json:"messages"`
     Stream    bool          `json:"stream,omitempty"`
     MaxTokens int           `json:"max_tokens,omitempty"`
+
+    // ── 扩展字段 (v0.2.0, CrabCode, 全部 json:"-") ──
+    RawMessages  interface{}            // 复杂消息体, 非 nil 时优先于 Messages
+    System       interface{}            // 系统提示 (string 或 content blocks)
+    Tools        interface{}            // 标准工具定义
+    Temperature  *float64
+    Thinking     *ThinkingConfig
+    Metadata     map[string]string
+    Betas        []string               // 显式 beta (SDK 自动合并去重)
+    ServerTools  []ServerTool           // 服务端工具 (合入 tools 数组)
+    Speed        string                 // "" | "fast"
+    Effort       *EffortConfig
+    OutputConfig *OutputConfig
+    ExtraBody    map[string]interface{} // 透传任意字段
 }
 
 type ChatResponse struct {
@@ -1171,13 +1410,74 @@ type ChatResponse struct {
 
 #### StreamEvent
 
-SSE 流式事件。
+SSE 流式事件。Server Tool 执行结果 (`web_search_tool_result` / `server_tool_use` 等) 以 JSON 内容透传在 `Data` 中，下游自行解析。
 
 ```go
 type StreamEvent struct {
     Event string `json:"event"` // "started" | "settled" | "" (数据块)
     Data  string `json:"data"`  // JSON 字符串
 }
+```
+
+### 6.2.1 Chat 扩展类型
+
+> v0.2.0 新增
+
+```go
+// ThinkingConfig 思考配置
+type ThinkingConfig struct {
+    Type         string // "adaptive" | "enabled" | "disabled"
+    BudgetTokens int    // type="enabled" 时的 token 预算
+    Display      string // "none" | "summary" | "" (完整)
+}
+
+// ServerTool 服务端工具
+type ServerTool struct {
+    Type   string                 // 如 "web_search_20250305"
+    Name   string                 // 如 "web_search"
+    Config map[string]interface{} // 工具特定配置
+}
+
+// WebSearchConfig 搜索工具配置
+type WebSearchConfig struct {
+    MaxUses        int      // 每请求最大搜索次数 (默认 8)
+    AllowedDomains []string // 域名白名单 (与 BlockedDomains 互斥)
+    BlockedDomains []string // 域名黑名单
+    UserLocation   *GeoLoc  // 搜索地域偏好
+}
+
+// GeoLoc 地理位置
+type GeoLoc struct {
+    Country string // ISO 3166-1 alpha-2
+    City    string
+}
+
+// EffortConfig 推理努力级别
+type EffortConfig struct {
+    Level string // "low" | "medium" | "high" | "max"
+}
+
+// OutputConfig 结构化输出配置
+type OutputConfig struct {
+    Format string      // "json_schema" | ""
+    Schema interface{} // JSON Schema 定义
+}
+```
+
+**预定义常量**:
+
+```go
+const ServerToolTypeWebSearch = "web_search_20250305"
+```
+
+**便捷方法**:
+
+```go
+// NewWebSearchTool 创建搜索工具 (校验 AllowedDomains ⊕ BlockedDomains 互斥)
+func NewWebSearchTool(cfg *WebSearchConfig) (ServerTool, error)
+
+// GetModelCapabilities 查询单个模型能力 (复用 ListModels 缓存, 5min TTL)
+func (c *Client) GetModelCapabilities(ctx context.Context, modelID string) (*ModelCapabilities, error)
 ```
 
 ### 6.3 权益类型
@@ -1678,8 +1978,9 @@ SDK 内置了多项安全防护措施，无需额外配置:
 ```
 acosmi-sdk-go/
 ├── auth.go              # OAuth 2.1 PKCE 认证流程
-├── client.go            # 统一 API 客户端（~940 行）
-├── types.go             # 所有数据类型定义
+├── client.go            # 统一 API 客户端 + buildChatRequest
+├── types.go             # 所有数据类型定义 (含 v0.2.0 扩展类型)
+├── betas.go             # Beta Header 自动组装引擎 (v0.2.0)
 ├── store.go             # Token 持久化接口 + 文件存储实现
 ├── scopes.go            # OAuth Scope 常量和分组函数
 ├── ws.go                # WebSocket 长连接（自动重连）
@@ -1847,6 +2148,72 @@ if errors.As(err, &rateErr) {
 ### Q: SDK 线程安全吗？
 
 是的。`Client` 内部使用 `sync.RWMutex` 保护所有共享状态（token、元数据），所有 API 调用都可以在多个 goroutine 中并发使用。
+
+---
+
+## 12. 版本修订记录
+
+### v0.2.0 (2026-04-06) — CrabCode 增值能力扩展
+
+**新增文件**:
+- `betas.go` — Beta Header 自动组装引擎 (11 项真实 beta + 互斥规则)
+
+**types.go 变更**:
+- `ChatRequest` 新增 12 个扩展字段: `RawMessages`, `System`, `Tools`, `Temperature`, `Thinking`, `Metadata`, `Betas`, `ServerTools`, `Speed`, `Effort`, `OutputConfig`, `ExtraBody`
+- 所有扩展字段标记 `json:"-"`，仅通过 `buildChatRequest` 序列化 (CrabClaw 零影响)
+- 新增 `ThinkingConfig` 结构体: `Type` (adaptive/enabled/disabled) + `BudgetTokens` + `Display`
+- 新增 `ServerTool` 结构体: `Type` + `Name` + `Config` (服务端工具, 如联网搜索)
+- 新增 `ServerToolTypeWebSearch` 常量: `"web_search_20250305"` (Brave Search)
+- 新增 `WebSearchConfig` 结构体: `MaxUses` + `AllowedDomains` + `BlockedDomains` + `UserLocation`
+- 新增 `GeoLoc` 结构体: `Country` (ISO 3166-1) + `City`
+- 新增 `EffortConfig` 结构体: `Level` (low/medium/high/max)
+- 新增 `OutputConfig` 结构体: `Format` (json_schema) + `Schema`
+- 新增 `NewWebSearchTool(cfg)` 便捷方法 (返回 `(ServerTool, error)`, 校验 AllowedDomains ⊕ BlockedDomains 互斥)
+- `ManagedModel` 新增 `Capabilities ModelCapabilities` 字段
+
+**新增 `ModelCapabilities` 结构体** (16 字段):
+- 思考: `SupportsThinking`, `SupportsAdaptiveThinking`, `SupportsISP`
+- 工具: `SupportsWebSearch`, `SupportsToolSearch`, `SupportsStructuredOutput`
+- 推理: `SupportsEffort`, `SupportsMaxEffort`, `SupportsFastMode`
+- 上下文: `Supports1MContext`, `SupportsPromptCache`, `SupportsCacheEditing`
+- 输出: `SupportsTokenEfficient`, `SupportsRedactThinking`
+- 数值: `MaxInputTokens`, `MaxOutputTokens`
+
+**client.go 变更**:
+- `Client` 新增 `modelCache []ManagedModel` + `modelCacheTime time.Time` (5min TTL)
+- 新增 `buildChatRequest(modelID, req)` 内部方法: ServerTools 合入 tools 数组 + ExtraBody 透传 + Beta 自动组装
+- 新增 `GetModelCapabilities(ctx, modelID)` 公开方法: 从 ListModels 缓存查询单个模型能力
+- 新增 `getCachedCapabilities(modelID)` 内部方法: 线程安全缓存查询
+- `ListModels()` 增加缓存写入逻辑
+- `Chat()` 重构: 从 `json.Marshal(req)` 改为 `buildChatRequest` → `json.RawMessage`
+- `chatStreamInternal()` 重构: 同上
+
+**auth.go 变更**:
+- 新增 `LoginWithHandler(ctx, appName, scopes, handler, opts...)` — 带事件回调的登录流程 (CrabCode 适配)
+- 新增 `LoginEvent` / `LoginErrCode` / `LoginEventType` 事件类型
+- 新增 `LoginOption` 函数式选项: `WithSkipBrowser()`, `WithLoginHint()`, `WithLoginMethod()`, `WithOrgUUID()`, `WithExpiresIn()`
+- `Login()` 内部委托 `loginInternal()`，签名不变
+
+**betas.go 新增** (11 项 beta 常量 + 逻辑):
+- `buildBetas(caps, req)` 根据 ModelCapabilities + 请求参数自动组装
+- 互斥规则: `structured-outputs` ⊕ `token-efficient-tools`
+- `uniqueMerge(base, extra)` 去重合并
+- 经联网验证剔除 3 项虚构 beta (task-budgets/advisor-tool/cache-editing)、修正 2 项日期 (structured-outputs → 2025-11-13, token-efficient-tools → 2025-02-19)
+
+**审计修复**:
+- P1: 删除 `hasServerTool` 死代码
+- P1: `NewWebSearchTool` 添加 `AllowedDomains ⊕ BlockedDomains` 互斥校验 (返回 error)
+- P2: 全部扩展字段统一 `json:"-"` (修正 System/Tools/Temperature/Thinking/Metadata 的 JSON tag 不一致)
+- P2: `buildChatRequest` 文档补充 ListModels 前置要求说明
+
+### v0.1.0 (2026-03-22) — 初始发布
+
+- 统一 acosmi-sdk-go (合并 desktop-sdk-go + jineng-sdk-go)
+- OAuth 2.1 PKCE 授权流程
+- 34 个公开 API 方法覆盖: 模型/权益/商城/钱包/技能/工具/WebSocket
+- CrabClaw-Skill CLI (13 命令)
+- 18 项根因修复 (3P0+5P1+8P2+6P3)
+- 中文开发手册
 
 ---
 
