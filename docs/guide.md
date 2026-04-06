@@ -2206,6 +2206,21 @@ if errors.As(err, &rateErr) {
 - P2: 全部扩展字段统一 `json:"-"` (修正 System/Tools/Temperature/Thinking/Metadata 的 JSON tag 不一致)
 - P2: `buildChatRequest` 文档补充 ListModels 前置要求说明
 
+### v0.2.0 后端安全加固 (2026-04-06)
+
+**Gateway 安全**:
+- `sanitizeBetas()`: beta header 字符白名单 `[a-zA-Z0-9_-]` + 单值长度 ≤64 + 数量 ≤20, 防止 CRLF/header 注入
+- `safePositiveInt()`: thinking_budget 类型校验 + 正数 + 上限 100000, 非法值静默降级
+- `adaptPassthrough` Speed 仅接受 `"fast"`, Effort level 仅接受 `low/medium/high/max`, 重建 map 丢弃未知 key
+- Effort 未知 level 不触发 `enable_thinking` (DashScope/VolcEngine switch 改为仅匹配已知值)
+
+**API 响应安全**:
+- 新增 `ManagedModelPublicResponse` — 非管理员 `GET /managed-models` 隐藏 providerConfig/endpoint/pricing/sortOrder/hasApiKey
+- 管理员和 S2S 端点保持完整 `ManagedModelResponse`
+
+**Chat 输入校验**:
+- `betas` ≤20, `tools` ≤50, `messages` ≤500, 超限返回 400
+
 ### v0.1.0 (2026-03-22) — 初始发布
 
 - 统一 acosmi-sdk-go (合并 desktop-sdk-go + jineng-sdk-go)
