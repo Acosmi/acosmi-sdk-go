@@ -221,12 +221,43 @@ type ChatResponse struct {
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
 	} `json:"usage"`
+	// 结算后余额 (从响应 Header X-Token-Remaining / X-Call-Remaining 填充)
+	// -1 表示服务端未返回
+	TokenRemaining int64 `json:"-"`
+	CallRemaining  int   `json:"-"`
 }
 
 // StreamEvent SSE 流式事件
 type StreamEvent struct {
 	Event string `json:"event"`
 	Data  string `json:"data"`
+}
+
+// StreamSettlement 流式结算事件 (从 settled SSE 事件解析)
+// 包含本次请求的 token 消耗及结算后的剩余余额
+type StreamSettlement struct {
+	RequestID      string `json:"requestId"`
+	ConsumeStatus  string `json:"consumeStatus"`
+	InputTokens    int    `json:"inputTokens"`
+	OutputTokens   int    `json:"outputTokens"`
+	TotalTokens    int    `json:"totalTokens"`
+	TokenRemaining int64  `json:"tokenRemaining"` // 结算后剩余 token (-1 表示服务端未返回)
+	CallRemaining  int    `json:"callRemaining"`  // 结算后剩余调用次数 (-1 表示服务端未返回)
+}
+
+// ParseSettlement 从 settled 类型的 StreamEvent 中解析结算信息
+// 如果事件不是 settled 类型，返回 nil
+func ParseSettlement(ev StreamEvent) *StreamSettlement {
+	if ev.Event != "settled" && ev.Event != "pending_settle" {
+		return nil
+	}
+	var s StreamSettlement
+	s.TokenRemaining = -1
+	s.CallRemaining = -1
+	if err := json.Unmarshal([]byte(ev.Data), &s); err != nil {
+		return nil
+	}
+	return &s
 }
 
 // ---------- Entitlements ----------

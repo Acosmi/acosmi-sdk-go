@@ -136,11 +136,11 @@ func main() {
 		fmt.Printf("WebSocket 已连接: %v\n", client.IsConnected())
 	}
 
-	// 10. 流式聊天
+	// 10. 流式聊天 (使用 ChatStreamWithUsage 自动获取实时余额)
 	modelID := models[0].ID
 	fmt.Printf("\n使用模型 %s 进行对话:\n", models[0].Name)
 
-	eventCh, errCh := client.ChatStream(ctx, modelID, acosmi.ChatRequest{
+	contentCh, settleCh, errCh := client.ChatStreamWithUsage(ctx, modelID, acosmi.ChatRequest{
 		Messages: []acosmi.ChatMessage{
 			{Role: "user", Content: "用一句话介绍你自己"},
 		},
@@ -148,10 +148,7 @@ func main() {
 	})
 
 	fmt.Print("AI: ")
-	for event := range eventCh {
-		if event.Event == "settled" || event.Event == "started" {
-			continue
-		}
+	for event := range contentCh {
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
@@ -164,6 +161,16 @@ func main() {
 		}
 	}
 	fmt.Println()
+
+	// 读取结算信息 (token 消耗 + 剩余余额)
+	if settle, ok := <-settleCh; ok {
+		fmt.Printf("\n消耗: %d token (输入 %d + 输出 %d)\n",
+			settle.TotalTokens, settle.InputTokens, settle.OutputTokens)
+		if settle.TokenRemaining >= 0 {
+			fmt.Printf("剩余: %d token / %d 次调用\n",
+				settle.TokenRemaining, settle.CallRemaining)
+		}
+	}
 
 	if err := <-errCh; err != nil {
 		log.Fatalf("流式聊天错误: %v", err)

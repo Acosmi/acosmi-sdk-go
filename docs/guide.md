@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> 版本: v0.2.0 | 语言: Go 1.22+ | 许可证: MIT
+> 版本: v0.2.1 | 语言: Go 1.22+ | 许可证: MIT
 
 ---
 
@@ -415,28 +415,31 @@ fmt.Printf("Token 消耗: 输入 %d + 输出 %d = 总计 %d\n",
     resp.Usage.PromptTokens,
     resp.Usage.CompletionTokens,
     resp.Usage.TotalTokens)
+
+// 结算后余额 (来自响应 Header, -1 表示服务端未返回)
+if resp.TokenRemaining >= 0 {
+    fmt.Printf("剩余: %d token / %d 次调用\n",
+        resp.TokenRemaining, resp.CallRemaining)
+}
 ```
 
-#### 流式聊天 (SSE)
+#### 流式聊天 (SSE) — 推荐使用 ChatStreamWithUsage
+
+`ChatStreamWithUsage` 自动解析控制事件，返回三个 channel:
+- `contentCh` — 纯内容增量事件 (已过滤 started/settled/failed)
+- `settleCh` — 结算信息 (token 消耗 + 剩余余额)
+- `errCh` — 传输错误或服务端 failed 事件
 
 ```go
-eventCh, errCh := client.ChatStream(ctx, modelID, acosmi.ChatRequest{
+contentCh, settleCh, errCh := client.ChatStreamWithUsage(ctx, modelID, acosmi.ChatRequest{
     Messages: []acosmi.ChatMessage{
         {Role: "user", Content: "写一首关于编程的诗"},
     },
     MaxTokens: 512,
 })
 
-// 实时读取流式事件
-for event := range eventCh {
-    // event.Event: "started" | "settled" | "" (数据块)
-    // event.Data: JSON 字符串
-
-    if event.Event == "started" || event.Event == "settled" {
-        continue // 跳过控制事件
-    }
-
-    // 解析增量内容
+// 实时读取内容 (无需手动过滤控制事件)
+for event := range contentCh {
     var chunk struct {
         Choices []struct {
             Delta struct {
@@ -450,7 +453,60 @@ for event := range eventCh {
     }
 }
 
-// 检查流式错误
+// 读取结算信息 (token 消耗 + 剩余余额)
+if settle, ok := <-settleCh; ok {
+    fmt.Printf("\n消耗: %d token (输入 %d + 输出 %d)\n",
+        settle.TotalTokens, settle.InputTokens, settle.OutputTokens)
+    if settle.TokenRemaining >= 0 {
+        fmt.Printf("剩余: %d token / %d 次调用\n",
+            settle.TokenRemaining, settle.CallRemaining)
+    }
+}
+
+// 检查错误 (传输错误或服务端 failed 事件)
+if err := <-errCh; err != nil {
+    log.Fatal(err)
+}
+```
+
+#### 流式聊天 (SSE) — 低级 API
+
+`ChatStream` 返回原始事件流，调用方需自行处理控制事件:
+
+```go
+eventCh, errCh := client.ChatStream(ctx, modelID, acosmi.ChatRequest{
+    Messages: []acosmi.ChatMessage{
+        {Role: "user", Content: "写一首关于编程的诗"},
+    },
+    MaxTokens: 512,
+})
+
+for event := range eventCh {
+    // event.Event: "started" | "settled" | "pending_settle" | "failed" | "" (数据块)
+
+    // 可用 ParseSettlement 解析结算事件
+    if s := acosmi.ParseSettlement(event); s != nil {
+        fmt.Printf("消耗: %d token, 剩余: %d\n", s.TotalTokens, s.TokenRemaining)
+        continue
+    }
+
+    if event.Event == "started" || event.Event == "failed" {
+        continue
+    }
+
+    var chunk struct {
+        Choices []struct {
+            Delta struct {
+                Content string `json:"content"`
+            } `json:"delta"`
+        } `json:"choices"`
+    }
+    json.Unmarshal([]byte(event.Data), &chunk)
+    if len(chunk.Choices) > 0 {
+        fmt.Print(chunk.Choices[0].Delta.Content)
+    }
+}
+
 if err := <-errCh; err != nil {
     log.Fatal(err)
 }
@@ -1405,6 +1461,10 @@ type ChatResponse struct {
         CompletionTokens int
         TotalTokens      int
     }
+    // 结算后余额 (从响应 Header 填充, json:"-" 不参与 JSON 序列化)
+    // -1 表示服务端未返回
+    TokenRemaining int64
+    CallRemaining  int
 }
 ```
 
@@ -1414,10 +1474,32 @@ SSE 流式事件。Server Tool 执行结果 (`web_search_tool_result` / `server_
 
 ```go
 type StreamEvent struct {
-    Event string `json:"event"` // "started" | "settled" | "" (数据块)
+    Event string `json:"event"` // "started" | "settled" | "pending_settle" | "failed" | "" (数据块)
     Data  string `json:"data"`  // JSON 字符串
 }
 ```
+
+#### StreamSettlement
+
+流式结算事件，包含本次请求的 token 消耗及结算后的剩余余额。通过 `ParseSettlement()` 从 `StreamEvent` 解析:
+
+```go
+type StreamSettlement struct {
+    RequestID      string `json:"requestId"`
+    ConsumeStatus  string `json:"consumeStatus"`  // "SETTLED" | "PENDING_SETTLE"
+    InputTokens    int    `json:"inputTokens"`
+    OutputTokens   int    `json:"outputTokens"`
+    TotalTokens    int    `json:"totalTokens"`
+    TokenRemaining int64  `json:"tokenRemaining"`  // -1 表示服务端未返回
+    CallRemaining  int    `json:"callRemaining"`   // -1 表示服务端未返回
+}
+
+// ParseSettlement 从 settled/pending_settle 类型的 StreamEvent 中解析结算信息
+// 非结算事件返回 nil
+func ParseSettlement(ev StreamEvent) *StreamSettlement
+```
+
+**便捷方法**: `ChatStreamWithUsage()` 内部已自动调用 `ParseSettlement`，推荐直接使用高级 API。
 
 ### 6.2.1 Chat 扩展类型
 
@@ -2152,6 +2234,31 @@ if errors.As(err, &rateErr) {
 ---
 
 ## 12. 版本修订记录
+
+### v0.2.1 (2026-04-06) — 实时余额推送
+
+**types.go 变更**:
+- `ChatResponse` 新增 `TokenRemaining int64` / `CallRemaining int` (`json:"-"`, 从响应 Header 填充, -1 = 未返回)
+- 新增 `StreamSettlement` 结构体: 7 字段 (requestId + consumeStatus + 3 token 消耗 + 2 余额)
+- 新增 `ParseSettlement(ev StreamEvent) *StreamSettlement` — 从 settled/pending_settle 事件解析结算信息
+
+**client.go 变更**:
+- `Chat()` 改用 `doJSONFull` — 读取 `X-Token-Remaining` / `X-Call-Remaining` 响应 Header 填充余额字段
+- 新增 `ChatStreamWithUsage(ctx, modelID, req)` — 返回 contentCh + settleCh + errCh 三 channel:
+  - contentCh: 纯内容事件 (过滤 started/settled/failed)
+  - settleCh: 结算信息 (token 消耗 + 剩余余额)
+  - errCh: 传输错误 + 服务端 failed 事件
+- 新增 `doJSONFull` / `doJSONFullInternal` — 返回 `(http.Header, error)`, 复用全部 doJSON 逻辑
+- `doJSON` 重构为 `doJSONFullInternal` 的 wrapper (消除 60 行代码重复)
+- 新增 `parseStreamError(data)` — 从 failed 事件 JSON 提取 `"stage: error"` 格式化错误
+
+**审计修复**:
+- P1: `ChatStreamWithUsage` 全部 channel send 用 `select + ctx.Done()` 防 goroutine 泄漏
+- P1: `failed` 事件不再泄漏到 contentCh, 解析为 error 发送到 errCh
+
+**后端变更** (nexus-v4 managed_model.go):
+- 流式 settled 事件新增 `tokenRemaining` / `callRemaining` (settle 后查询余额, 失败静默降级)
+- 同步响应新增 `X-Token-Remaining` / `X-Call-Remaining` Header
 
 ### v0.2.0 (2026-04-06) — CrabCode 增值能力扩展
 
