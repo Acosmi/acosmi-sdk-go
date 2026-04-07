@@ -576,19 +576,22 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	}
 }
 
-// ChatStreamWithUsage 流式聊天，自动解析结算事件
-// 返回内容事件 channel、结算结果 channel 和错误 channel
-// contentCh 只包含内容增量事件 (过滤掉 started/settled/failed)
+// ChatStreamWithUsage 流式聊天，自动解析结算事件和搜索来源
+// 返回: contentCh (内容增量), sourcesCh (搜索来源), settleCh (结算), errCh (错误)
+// contentCh 只包含内容增量事件 (过滤掉 started/settled/failed/sources)
+// sourcesCh 在检测到搜索结果时发送来源列表 (可能多次, 每次搜索一批)
 // settleCh 在流结束时发送结算信息 (包含 token 消耗和剩余余额)
 // errCh 报告传输错误或服务端 failed 事件
-func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req ChatRequest) (<-chan StreamEvent, <-chan StreamSettlement, <-chan error) {
+func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req ChatRequest) (<-chan StreamEvent, <-chan SourcesEvent, <-chan StreamSettlement, <-chan error) {
 	rawCh, rawErrCh := c.ChatStream(ctx, modelID, req)
 	contentCh := make(chan StreamEvent, 32)
+	sourcesCh := make(chan SourcesEvent, 8)
 	settleCh := make(chan StreamSettlement, 1)
 	errCh := make(chan error, 1)
 
 	go func() {
 		defer close(contentCh)
+		defer close(sourcesCh)
 		defer close(settleCh)
 		defer close(errCh)
 
@@ -597,6 +600,15 @@ func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req Ch
 			if s := ParseSettlement(ev); s != nil {
 				select {
 				case settleCh <- *s:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			// 搜索来源事件
+			if src := ParseSourcesEvent(ev); src != nil {
+				select {
+				case sourcesCh <- *src:
 				case <-ctx.Done():
 					return
 				}
@@ -623,11 +635,14 @@ func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req Ch
 			}
 		}
 		if err := <-rawErrCh; err != nil {
-			errCh <- err
+			select {
+			case errCh <- err:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
-	return contentCh, settleCh, errCh
+	return contentCh, sourcesCh, settleCh, errCh
 }
 
 // parseStreamError 从 failed 事件 JSON 中提取错误描述

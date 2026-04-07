@@ -78,9 +78,10 @@ type ModelCapabilities struct {
 	SupportsStructuredOutput bool `json:"supports_structured_output"`
 
 	// 推理控制
-	SupportsEffort   bool `json:"supports_effort"`
+	SupportsEffort    bool `json:"supports_effort"`
 	SupportsMaxEffort bool `json:"supports_max_effort"` // Opus 4.6 独有
-	SupportsFastMode bool `json:"supports_fast_mode"`   // Opus 4.6 独有
+	SupportsFastMode  bool `json:"supports_fast_mode"`  // Opus 4.6 独有
+	SupportsAutoMode  bool `json:"supports_auto_mode"`  // Auto 模式 (模型自主选择工具/搜索策略)
 
 	// 上下文与缓存
 	Supports1MContext    bool `json:"supports_1m_context"`
@@ -206,6 +207,45 @@ func NewWebSearchTool(cfg *WebSearchConfig) (ServerTool, error) {
 		}
 	}
 	return st, nil
+}
+
+// ---------- Web Search Sources ----------
+
+// WebSearchSource 联网搜索结果来源 (与后端 adk/stream_helpers.go SourceItem 对齐)
+type WebSearchSource struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet,omitempty"`
+}
+
+// SourcesEvent 搜索来源事件 (从 SSE "sources" 事件解析)
+// ADK 路径: data: {"type":"sources","sources":[...],"session_id":"..."}
+// Gateway 路径: 由 Gateway 从上游响应中提取后注入
+type SourcesEvent struct {
+	Sources   []WebSearchSource `json:"sources"`
+	SessionID string            `json:"session_id,omitempty"`
+}
+
+// ParseSourcesEvent 从 StreamEvent 中解析搜索来源
+// 返回 nil 表示该事件不是 sources 类型
+func ParseSourcesEvent(ev StreamEvent) *SourcesEvent {
+	// 方式 1: event 字段为 "sources"
+	// 方式 2: data JSON 中 type 字段为 "sources"
+	var wrapper struct {
+		Type    string            `json:"type"`
+		Sources []WebSearchSource `json:"sources"`
+		SID     string            `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(ev.Data), &wrapper); err != nil {
+		return nil
+	}
+	if wrapper.Type != "sources" && ev.Event != "sources" {
+		return nil
+	}
+	if len(wrapper.Sources) == 0 {
+		return nil
+	}
+	return &SourcesEvent{Sources: wrapper.Sources, SessionID: wrapper.SID}
 }
 
 // ChatResponse 同步聊天响应

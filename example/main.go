@@ -140,12 +140,22 @@ func main() {
 	modelID := models[0].ID
 	fmt.Printf("\n使用模型 %s 进行对话:\n", models[0].Name)
 
-	contentCh, settleCh, errCh := client.ChatStreamWithUsage(ctx, modelID, acosmi.ChatRequest{
+	contentCh, sourcesCh, settleCh, errCh := client.ChatStreamWithUsage(ctx, modelID, acosmi.ChatRequest{
 		Messages: []acosmi.ChatMessage{
 			{Role: "user", Content: "用一句话介绍你自己"},
 		},
 		MaxTokens: 256,
 	})
+
+	// 并发消费 sources channel (搜索来源)
+	go func() {
+		for src := range sourcesCh {
+			fmt.Printf("\n[搜索来源: %d 条]\n", len(src.Sources))
+			for _, s := range src.Sources {
+				fmt.Printf("  - %s %s\n", s.Title, s.URL)
+			}
+		}
+	}()
 
 	fmt.Print("AI: ")
 	for event := range contentCh {
