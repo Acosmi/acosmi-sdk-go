@@ -345,6 +345,7 @@ if err := <-errCh; err != nil {
 | 响应格式 | `ChatResponse` (Choices) | `AnthropicResponse` (Content) |
 | 流式控制事件 | started/settled/failed/[DONE] | 无 (message_stop 自然结束) |
 | 错误格式 | `{"code":N,"message":"..."}` | `{"type":"error","error":{...}}` |
+| Provider 限制 | 所有 provider | **所有 provider** (Qwen/GLM/豆包/Kimi/Claude 等均支持) |
 
 #### 扩展字段 (CrabCode)
 
