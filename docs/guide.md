@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.3.1 | Go 1.22+ | MIT
+> v0.4.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -290,6 +290,61 @@ for event := range eventCh {
     // 解析 chunk...
 }
 ```
+
+#### Anthropic 原生格式 — ChatMessages (V8)
+
+调用 `POST /managed-models/:id/messages`，请求/响应均为 Anthropic 协议格式。
+适用于 CrabCode 等需要 Anthropic 原生格式的场景。
+
+**同步调用:**
+
+```go
+resp, _ := client.ChatMessages(ctx, modelID, acosmi.ChatRequest{
+    RawMessages: []map[string]interface{}{
+        {"role": "user", "content": "Go 语言的优势？"},
+    },
+    MaxTokens: 1024,
+})
+fmt.Println(resp.TextContent()) // 提取所有 text 块拼接
+fmt.Printf("tokens: %d in / %d out\n", resp.Usage.InputTokens, resp.Usage.OutputTokens)
+```
+
+**流式调用:**
+
+```go
+eventCh, errCh := client.ChatMessagesStream(ctx, modelID, acosmi.ChatRequest{
+    RawMessages: []map[string]interface{}{
+        {"role": "user", "content": "写一首诗"},
+    },
+    MaxTokens: 512,
+})
+for event := range eventCh {
+    // Anthropic SSE 事件: message_start, content_block_start, content_block_delta, message_delta, message_stop
+    var delta struct {
+        Type  string `json:"type"`
+        Delta struct {
+            Type string `json:"type"`
+            Text string `json:"text"`
+        } `json:"delta"`
+    }
+    if json.Unmarshal([]byte(event.Data), &delta) == nil && delta.Delta.Text != "" {
+        fmt.Print(delta.Delta.Text)
+    }
+}
+if err := <-errCh; err != nil {
+    log.Fatal(err)
+}
+```
+
+**与 Chat/ChatStream 的区别:**
+
+| | Chat / ChatStream | ChatMessages / ChatMessagesStream |
+|---|---|---|
+| 端点 | `/:id/chat` | `/:id/messages` |
+| 请求格式 | OpenAI (Choices) | Anthropic (Content Blocks) |
+| 响应格式 | `ChatResponse` (Choices) | `AnthropicResponse` (Content) |
+| 流式控制事件 | started/settled/failed/[DONE] | 无 (message_stop 自然结束) |
+| 错误格式 | `{"code":N,"message":"..."}` | `{"type":"error","error":{...}}` |
 
 #### 扩展字段 (CrabCode)
 
@@ -595,12 +650,33 @@ type ChatRequest struct {
     ExtraBody    map[string]interface{} // 透传任意字段
 }
 
-type ChatResponse struct {
+type ChatResponse struct {       // /chat (OpenAI 格式)
     ID      string
     Choices []struct{ Index int; Message ChatMessage }
     Usage   struct{ PromptTokens, CompletionTokens, TotalTokens int }
     TokenRemaining int64 // Header 填充, -1=未返回
     CallRemaining  int
+}
+
+type AnthropicResponse struct {  // /messages (Anthropic 格式)
+    ID           string
+    Type         string                  // "message"
+    Role         string                  // "assistant"
+    Content      []AnthropicContentBlock
+    Model        string
+    StopReason   string
+    Usage        AnthropicUsage
+}
+type AnthropicContentBlock struct {
+    Type     string          // "text" | "thinking" | "tool_use"
+    Text     string
+    ID       string          // tool_use block ID
+    Name     string          // tool_use function name
+    Input    json.RawMessage // tool_use arguments
+    Thinking string          // thinking block content
+}
+type AnthropicUsage struct {
+    InputTokens, OutputTokens int
 }
 
 type StreamEvent struct {
@@ -921,6 +997,21 @@ func main() {
     }
     if err := <-errCh; err != nil { log.Fatal(err) }
 }
+
+// ── Anthropic 原生格式调用 ──
+fmt.Println("\n=== Anthropic 原生格式 ===")
+anthropicResp, err := client.ChatMessages(ctx, "claude-opus-4-6", acosmi.ChatRequest{
+    RawMessages: []map[string]interface{}{
+        {"role": "user", "content": "用一句话介绍 Go 语言"},
+    },
+    MaxTokens: 256,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println(anthropicResp.TextContent())
+fmt.Printf("tokens: %d in / %d out\n",
+    anthropicResp.Usage.InputTokens, anthropicResp.Usage.OutputTokens)
 ```
 
 ---
@@ -997,6 +1088,14 @@ make install    # → $GOPATH/bin
 ---
 
 ## 12. 版本记录
+
+### v0.4.0 (2026-04-10) — Anthropic 原生格式支持
+
+- 新增 `ChatMessages()` 同步调用 Anthropic 原生端点 (`POST /:id/messages`)
+- 新增 `ChatMessagesStream()` 流式调用 Anthropic 原生端点
+- 新增 `AnthropicResponse` / `AnthropicContentBlock` / `AnthropicUsage` 类型
+- 新增 `AnthropicResponse.TextContent()` 便捷方法
+- Anthropic 流式无 `started`/`settled`/`failed` 自定义事件，无 `[DONE]`，`message_stop` 为自然结束
 
 ### v0.3.1 (2026-04-09) — 开发手册审计修正
 

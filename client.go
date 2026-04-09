@@ -458,6 +458,12 @@ func (c *Client) buildChatRequest(modelID string, req *ChatRequest) ([]byte, err
 // 响应的 TokenRemaining / CallRemaining 字段来自服务端 Header，反映结算后余额
 func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
+	// Chat 请求可能 30-120s+，使用 5 分钟超时而非默认 30s
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
 	body, err := c.buildChatRequest(modelID, &req)
 	if err != nil {
 		return nil, fmt.Errorf("build chat request: %w", err)
@@ -480,6 +486,114 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 		}
 	}
 	return &resp, nil
+}
+
+// ChatMessages Anthropic 原生格式同步聊天
+// 调用 POST /managed-models/:id/messages，响应为 Anthropic 协议格式 (无 response.Success 包装)
+func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatRequest) (*AnthropicResponse, error) {
+	req.Stream = false
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
+	body, err := c.buildChatRequest(modelID, &req)
+	if err != nil {
+		return nil, fmt.Errorf("build chat request: %w", err)
+	}
+	var resp AnthropicResponse
+	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/messages", json.RawMessage(body), &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ChatMessagesStream Anthropic 原生格式流式聊天 (SSE)
+// 调用 POST /managed-models/:id/messages，SSE 事件为 Anthropic 协议格式
+// 无 started/settled/failed 自定义事件，无 data: [DONE]，message_stop 为自然结束
+func (c *Client) ChatMessagesStream(ctx context.Context, modelID string, req ChatRequest) (<-chan StreamEvent, <-chan error) {
+	eventCh := make(chan StreamEvent, 32)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(eventCh)
+		defer close(errCh)
+		c.chatMessagesStreamInternal(ctx, modelID, req, eventCh, errCh, false)
+	}()
+
+	return eventCh, errCh
+}
+
+// chatMessagesStreamInternal Anthropic 格式流式内部实现
+func (c *Client) chatMessagesStreamInternal(ctx context.Context, modelID string, req ChatRequest,
+	eventCh chan<- StreamEvent, errCh chan<- error, retried bool) {
+
+	req.Stream = true
+	body, buildErr := c.buildChatRequest(modelID, &req)
+	if buildErr != nil {
+		errCh <- buildErr
+		return
+	}
+
+	token, err := c.ensureToken(ctx)
+	if err != nil {
+		errCh <- err
+		return
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/messages"),
+		bytes.NewReader(body))
+	if err != nil {
+		errCh <- err
+		return
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		errCh <- err
+		return
+	}
+	defer resp.Body.Close()
+
+	// 401 单次重试
+	if resp.StatusCode == http.StatusUnauthorized && !retried {
+		resp.Body.Close()
+		if refreshErr := c.forceRefresh(ctx); refreshErr != nil {
+			errCh <- fmt.Errorf("messages stream: unauthorized and refresh failed: %w", refreshErr)
+			return
+		}
+		c.chatMessagesStreamInternal(ctx, modelID, req, eventCh, errCh, true)
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+		errCh <- fmt.Errorf("messages stream: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, maxSSELineSize), maxSSELineSize)
+
+	var currentEvent string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event:") {
+			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		} else if strings.HasPrefix(line, "data:") {
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			eventCh <- StreamEvent{Event: currentEvent, Data: data}
+			// Anthropic 流无 [DONE]，message_stop 事件后上游关闭连接
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		errCh <- err
+	}
 }
 
 // ChatStream 流式聊天 (SSE)，通过 channel 返回事件
@@ -1187,8 +1301,12 @@ func (c *Client) doJSONFull(ctx context.Context, method, path string, body inter
 }
 
 func (c *Client) doJSONFullInternal(ctx context.Context, method, path string, body interface{}, result interface{}, retried bool) (http.Header, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	// 如果调用方已设置 deadline（如 Chat 的 5min），不覆盖；否则默认 30s
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 
 	token, err := c.ensureToken(ctx)
 	if err != nil {

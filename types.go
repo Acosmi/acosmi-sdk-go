@@ -3,6 +3,7 @@ package acosmi
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -265,6 +266,46 @@ type ChatResponse struct {
 	// -1 表示服务端未返回
 	TokenRemaining int64 `json:"-"`
 	CallRemaining  int   `json:"-"`
+}
+
+// AnthropicResponse Anthropic 原生格式同步响应
+// POST /managed-models/:id/messages 返回此格式 (无 response.Success 包装)
+type AnthropicResponse struct {
+	ID           string                   `json:"id"`
+	Type         string                   `json:"type"`            // "message"
+	Role         string                   `json:"role"`            // "assistant"
+	Content      []AnthropicContentBlock  `json:"content"`
+	Model        string                   `json:"model"`
+	StopReason   string                   `json:"stop_reason"`
+	StopSequence *string                  `json:"stop_sequence,omitempty"`
+	Usage        AnthropicUsage           `json:"usage"`
+}
+
+// AnthropicContentBlock Anthropic 内容块
+type AnthropicContentBlock struct {
+	Type    string `json:"type"`              // "text" | "thinking" | "tool_use"
+	Text    string `json:"text,omitempty"`
+	ID      string `json:"id,omitempty"`      // tool_use block ID
+	Name    string `json:"name,omitempty"`    // tool_use function name
+	Input   json.RawMessage `json:"input,omitempty"` // tool_use arguments
+	Thinking string `json:"thinking,omitempty"` // thinking block content
+}
+
+// AnthropicUsage Anthropic token 用量
+type AnthropicUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// TextContent 提取所有 text 类型内容块的文本，拼接返回
+func (r *AnthropicResponse) TextContent() string {
+	var parts []string
+	for _, b := range r.Content {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // StreamEvent SSE 流式事件
