@@ -106,6 +106,32 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 
+// ChatContentBlock Anthropic 响应内容块 (v0.4.1)
+type ChatContentBlock struct {
+	Type       string          `json:"type"`
+	Text       string          `json:"text,omitempty"`
+	Citations  interface{}     `json:"citations,omitempty"`
+	Thinking   string          `json:"thinking,omitempty"`
+	Signature  string          `json:"signature,omitempty"`
+	Data       string          `json:"data,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	Name       string          `json:"name,omitempty"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	ServerName string          `json:"server_name,omitempty"`
+	Caller     interface{}     `json:"caller,omitempty"`
+	ToolUseID  string          `json:"tool_use_id,omitempty"`
+	Content    interface{}     `json:"content,omitempty"`
+	IsError    *bool           `json:"is_error,omitempty"`
+}
+
+// ChatUsage Anthropic 格式 token 用量 (v0.4.1)
+type ChatUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	CacheCreationInput int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInput     int `json:"cache_read_input_tokens,omitempty"`
+}
+
 // ChatRequest 聊天请求
 // 基础字段供 CrabClaw 使用, 扩展字段供 CrabCode 使用
 // 所有新增字段零值不改变行为 (向后兼容)
@@ -249,19 +275,15 @@ func ParseSourcesEvent(ev StreamEvent) *SourcesEvent {
 	return &SourcesEvent{Sources: wrapper.Sources, SessionID: wrapper.SID}
 }
 
-// ChatResponse 同步聊天响应
+// ChatResponse 同步聊天响应 (Anthropic format, v0.4.1)
 type ChatResponse struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Choices []struct {
-		Index   int         `json:"index"`
-		Message ChatMessage `json:"message"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+	ID         string             `json:"id"`
+	Type       string             `json:"type"`
+	Model      string             `json:"model"`
+	Role       string             `json:"role"`
+	Content    []ChatContentBlock `json:"content"`
+	StopReason string             `json:"stop_reason"`
+	Usage      ChatUsage          `json:"usage"`
 	// 结算后余额 (从响应 Header X-Token-Remaining / X-Call-Remaining 填充)
 	// -1 表示服务端未返回
 	TokenRemaining int64 `json:"-"`
@@ -282,13 +304,35 @@ type AnthropicResponse struct {
 }
 
 // AnthropicContentBlock Anthropic 内容块
+// 覆盖: text / thinking / redacted_thinking / tool_use / tool_result /
+//       server_tool_use / mcp_tool_use / mcp_tool_result
 type AnthropicContentBlock struct {
-	Type     string          `json:"type"`                        // "text" | "thinking" | "tool_use"
+	Type     string          `json:"type"`
 	Text     string          `json:"text,omitempty"`
-	ID       string          `json:"id,omitempty"`                // tool_use block ID
+	ID       string          `json:"id,omitempty"`                // tool_use / server_tool_use / mcp_tool_use block ID
 	Name     string          `json:"name,omitempty"`              // tool_use function name
 	Input    json.RawMessage `json:"input,omitempty"`             // tool_use arguments
 	Thinking string          `json:"thinking,omitempty"`          // thinking block content
+
+	// text — web_search 搜索引用
+	Citations interface{} `json:"citations,omitempty"`
+
+	// thinking — Anthropic 签名 (后续请求必须回传)
+	Signature string `json:"signature,omitempty"`
+
+	// redacted_thinking — base64 编码的被审查思考内容
+	Data string `json:"data,omitempty"`
+
+	// server_tool_use / mcp_tool_use / mcp_tool_result — 服务端工具来源
+	ServerName string `json:"server_name,omitempty"`
+
+	// mcp_tool_use — MCP 调用者上下文
+	Caller interface{} `json:"caller,omitempty"`
+
+	// tool_result / mcp_tool_result — 工具执行结果
+	ToolUseID string      `json:"tool_use_id,omitempty"`
+	Content   interface{} `json:"content,omitempty"`
+	IsError   *bool       `json:"is_error,omitempty"`
 }
 
 // AnthropicUsage Anthropic token 用量

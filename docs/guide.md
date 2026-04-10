@@ -690,12 +690,20 @@ type AnthropicResponse struct {  // /anthropic (Anthropic 格式)
     Usage        AnthropicUsage
 }
 type AnthropicContentBlock struct {
-    Type     string          // "text" | "thinking" | "tool_use"
-    Text     string
-    ID       string          // tool_use block ID
-    Name     string          // tool_use function name
-    Input    json.RawMessage // tool_use arguments
-    Thinking string          // thinking block content
+    Type       string          // text / thinking / redacted_thinking / tool_use / tool_result / server_tool_use / mcp_tool_use / mcp_tool_result
+    Text       string
+    ID         string          // tool_use / server_tool_use / mcp_tool_use block ID
+    Name       string          // tool_use function name
+    Input      json.RawMessage // tool_use arguments
+    Thinking   string          // thinking block content
+    Citations  interface{}     // text — web_search 搜索引用
+    Signature  string          // thinking — Anthropic 签名 (后续请求需回传)
+    Data       string          // redacted_thinking — base64 编码内容
+    ServerName string          // server_tool_use / mcp_tool_use / mcp_tool_result — 服务端工具来源
+    Caller     interface{}     // mcp_tool_use — MCP 调用者上下文
+    ToolUseID  string          // tool_result / mcp_tool_result — 关联的 tool_use block ID
+    Content    interface{}     // tool_result / mcp_tool_result — 工具返回内容
+    IsError    *bool           // tool_result / mcp_tool_result — 是否报错
 }
 type AnthropicUsage struct {
     InputTokens              int

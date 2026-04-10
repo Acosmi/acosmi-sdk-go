@@ -471,7 +471,7 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 	var resp ChatResponse
 	resp.TokenRemaining = -1
 	resp.CallRemaining = -1
-	headers, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/chat", json.RawMessage(body), &resp)
+	headers, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(body), &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -632,7 +632,7 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/chat"),
+		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/anthropic"),
 		bytes.NewReader(body))
 	if err != nil {
 		errCh <- err
