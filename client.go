@@ -489,7 +489,8 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 }
 
 // ChatMessages Anthropic 原生格式同步聊天
-// 调用 POST /managed-models/:id/anthropic，响应为 Anthropic 协议格式 (无 response.Success 包装)
+// 调用 POST /managed-models/:id/anthropic
+// 兼容两种响应格式: 裸 Anthropic JSON 或 {"code":0,"data":{...}} APIResponse 包装
 func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatRequest) (*AnthropicResponse, error) {
 	req.Stream = false
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
@@ -501,9 +502,34 @@ func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatReque
 	if err != nil {
 		return nil, fmt.Errorf("build chat request: %w", err)
 	}
-	var resp AnthropicResponse
-	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(body), &resp); err != nil {
+
+	// 用 json.RawMessage 接收原始 JSON，以兼容两种响应格式
+	var raw json.RawMessage
+	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(body), &raw); err != nil {
 		return nil, err
+	}
+
+	// 尝试 APIResponse 包装: {"code":0,"message":"...","data":{...}}
+	var wrapper struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(raw, &wrapper) == nil && len(wrapper.Data) > 0 && string(wrapper.Data) != "null" {
+		if wrapper.Code != 0 {
+			return nil, &BusinessError{Code: wrapper.Code, Message: wrapper.Message}
+		}
+		var resp AnthropicResponse
+		if err := json.Unmarshal(wrapper.Data, &resp); err != nil {
+			return nil, fmt.Errorf("decode anthropic response from wrapper: %w", err)
+		}
+		return &resp, nil
+	}
+
+	// 裸 Anthropic JSON 直解
+	var resp AnthropicResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("decode anthropic response: %w", err)
 	}
 	return &resp, nil
 }
