@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.4.0 | Go 1.22+ | MIT
+> v0.4.1 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -277,7 +277,7 @@ if err := <-errCh; err != nil {
 
 #### 流式聊天 — ChatStream (低级 API)
 
-返回原始事件流，需自行处理控制事件 (`started`/`settled`/`failed`):
+返回原始事件流，需自行处理控制事件 (`started`/`settled`/`pending_settle`/`failed`/`sources`):
 
 ```go
 eventCh, errCh := client.ChatStream(ctx, modelID, req)
@@ -286,14 +286,20 @@ for event := range eventCh {
         fmt.Printf("消耗: %d token\n", s.TotalTokens)
         continue
     }
-    if event.Event == "started" || event.Event == "failed" { continue }
+    switch event.Event {
+    case "started", "pending_settle", "sources":
+        continue // 控制事件，跳过
+    case "failed":
+        log.Printf("stream failed: %s", event.Data)
+        continue
+    }
     // 解析 chunk...
 }
 ```
 
 #### Anthropic 原生格式 — ChatMessages (V8)
 
-调用 `POST /managed-models/:id/messages`，请求/响应均为 Anthropic 协议格式。
+调用 `POST /managed-models/:id/anthropic`，请求/响应均为 Anthropic 协议格式。
 适用于 CrabCode 等需要 Anthropic 原生格式的场景。
 
 **同步调用:**
@@ -340,12 +346,12 @@ if err := <-errCh; err != nil {
 
 | | Chat / ChatStream | ChatMessages / ChatMessagesStream |
 |---|---|---|
-| 端点 | `/:id/chat` | `/:id/messages` |
-| 请求格式 | OpenAI (Choices) | Anthropic (Content Blocks) |
-| 响应格式 | `ChatResponse` (Choices) | `AnthropicResponse` (Content) |
-| 流式控制事件 | started/settled/failed/[DONE] | 无 (message_stop 自然结束) |
+| 端点 | `/:id/chat` | `/:id/anthropic` |
+| 请求类型 | `ChatRequest` (统一) | `ChatRequest` (统一) |
+| 响应格式 | `ChatResponse` (Choices) | `AnthropicResponse` (Content Blocks) |
+| 流式控制事件 | started/settled/pending_settle/failed/[DONE] | 无 (message_stop 自然结束) |
 | 错误格式 | `{"code":N,"message":"..."}` | `{"type":"error","error":{...}}` |
-| Provider 限制 | 所有 provider | **所有 provider** (Qwen/GLM/豆包/Kimi/Claude 等均支持) |
+| Provider 限制 | 所有 provider | Anthropic + 支持 Anthropic 格式的 provider (需端点支持) |
 
 #### 扩展字段 (CrabCode)
 
@@ -653,19 +659,21 @@ type ChatRequest struct {
 
 type ChatResponse struct {       // /chat (OpenAI 格式)
     ID      string
+    Object  string              // "chat.completion"
     Choices []struct{ Index int; Message ChatMessage }
     Usage   struct{ PromptTokens, CompletionTokens, TotalTokens int }
     TokenRemaining int64 // Header 填充, -1=未返回
     CallRemaining  int
 }
 
-type AnthropicResponse struct {  // /messages (Anthropic 格式)
+type AnthropicResponse struct {  // /anthropic (Anthropic 格式)
     ID           string
     Type         string                  // "message"
     Role         string                  // "assistant"
     Content      []AnthropicContentBlock
     Model        string
     StopReason   string
+    StopSequence *string                 // 触发的停止序列 (可 nil)
     Usage        AnthropicUsage
 }
 type AnthropicContentBlock struct {
@@ -677,8 +685,16 @@ type AnthropicContentBlock struct {
     Thinking string          // thinking block content
 }
 type AnthropicUsage struct {
-    InputTokens, OutputTokens int
+    InputTokens              int
+    OutputTokens             int
+    CacheCreationInputTokens int // prompt cache 创建 token
+    CacheReadInputTokens     int // prompt cache 读取 token
 }
+
+// 辅助方法:
+// resp.TextContent()      → 提取所有 text 块文本
+// resp.ThinkingContent()  → 提取所有 thinking 块文本
+// resp.ToolUseBlocks()    → 返回所有 tool_use 块
 
 type StreamEvent struct {
     Event string // started | settled | pending_settle | failed | "" (数据块)
@@ -737,12 +753,18 @@ type EntitlementItem struct {
     ID, Type, Status string // Type: REG_BONUS|FREE_TRIAL|TOKEN_PKG|MONTHLY  Status: active|expired|exhausted
     TokenQuota, TokenUsed, TokenRemaining int64
     CallQuota, CallUsed, CallRemaining    int
-    ExpiresAt *string
+    ExpiresAt  *string
+    SourceID   string // 来源 ID
+    SourceType string // 来源类型
+    Remark     string
+    CreatedAt  string
 }
 
 type BalanceDetail struct {
-    EntitlementBalance                    // 聚合字段 (同 EntitlementBalance)
-    Entitlements []EntitlementItem        // 每条权益明细
+    TotalTokenQuota, TotalTokenUsed, TotalTokenRemaining int64
+    TotalCallQuota, TotalCallUsed, TotalCallRemaining    int
+    ActiveEntitlements int
+    Entitlements []EntitlementItem
 }
 
 type ConsumeRecord struct {
@@ -757,7 +779,7 @@ type ConsumeRecordPage struct { Records []ConsumeRecord; Total int64; Page, Page
 ```go
 type TokenPackage struct {
     ID, Name, Description string; TokenQuota int64; CallQuota int
-    Price json.Number; ValidDays int; IsEnabled bool
+    Price json.Number; ValidDays int; IsEnabled bool; SortOrder int
 }
 
 type Order struct {
@@ -786,9 +808,11 @@ type SkillStoreItem struct {
     ID, PluginID, Key, Name, Description, Icon, Category string
     InputSchema, OutputSchema, Version, Author, PublisherID string
     Readme, Scope, Status, Visibility, CertificationStatus string
+    PluginName, PluginIcon string
     Tags []string; DownloadCount, TotalCalls, AvgDurationMs int64
     SecurityScore int; SecurityLevel string; SuccessRate float64
     IsEnabled, IsPublished bool; Timeout, RetryCount, RetryDelay int
+    Source, UpdatedAt string
 }
 
 type SkillStoreListItem struct {
@@ -867,6 +891,12 @@ type BusinessError struct { Code int; Message string }
 // OrderTerminalError: 订单到达非成功终态 (FAILED/CANCELLED/CLOSED/EXPIRED/REFUNDED)
 // WaitForPayment 在终态非成功时返回
 type OrderTerminalError struct { OrderID, Status string }
+
+// HTTP 错误统一解析 (parseHTTPError):
+// Anthropic: {"type":"error","error":{"type":"...","message":"..."}} → "HTTP 400: [invalid_request_error] ..."
+// OpenAI:    {"error":{"message":"..."}}                            → "HTTP 400: ..."
+// 其他:      原始响应体                                               → "HTTP 400: {raw body}"
+// 所有 Chat/ChatMessages/ChatStream 等方法均使用此统一解析
 
 // 类型断言示例
 var rateErr *acosmi.RateLimitError
@@ -997,22 +1027,22 @@ func main() {
         fmt.Printf("消耗: %d token, 剩余: %d\n", settle.TotalTokens, settle.TokenRemaining)
     }
     if err := <-errCh; err != nil { log.Fatal(err) }
-}
 
-// ── Anthropic 原生格式调用 ──
-fmt.Println("\n=== Anthropic 原生格式 ===")
-anthropicResp, err := client.ChatMessages(ctx, "claude-opus-4-6", acosmi.ChatRequest{
-    RawMessages: []map[string]interface{}{
-        {"role": "user", "content": "用一句话介绍 Go 语言"},
-    },
-    MaxTokens: 256,
-})
-if err != nil {
-    log.Fatal(err)
+    // ── Anthropic 原生格式调用 ──
+    fmt.Println("\n=== Anthropic 原生格式 ===")
+    anthropicResp, err := client.ChatMessages(ctx, "claude-opus-4-6", acosmi.ChatRequest{
+        RawMessages: []map[string]interface{}{
+            {"role": "user", "content": "用一句话介绍 Go 语言"},
+        },
+        MaxTokens: 256,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(anthropicResp.TextContent())
+    fmt.Printf("tokens: %d in / %d out\n",
+        anthropicResp.Usage.InputTokens, anthropicResp.Usage.OutputTokens)
 }
-fmt.Println(anthropicResp.TextContent())
-fmt.Printf("tokens: %d in / %d out\n",
-    anthropicResp.Usage.InputTokens, anthropicResp.Usage.OutputTokens)
 ```
 
 ---
@@ -1090,9 +1120,21 @@ make install    # → $GOPATH/bin
 
 ## 12. 版本记录
 
+### v0.4.1 (2026-04-10) — 全量审计修复
+
+- **fix(betas)**: Anthropic 端点 betas 静默丢失 — `AnthropicProxyRequest.Betas` 从 `json:"-"` 改为 `json:"betas,omitempty"` 支持 body 传递 (header 仍优先覆盖)
+- 端点路由 `/messages` → `/anthropic` (区分格式，不拼接上游后缀)
+- `parseHTTPError()` 统一 6 处错误解析 (兼容 Anthropic + OpenAI 错误格式)
+- `AnthropicUsage` 补齐 `CacheCreationInputTokens` / `CacheReadInputTokens`
+- `AnthropicResponse` 补齐 `StopSequence` 字段
+- 新增 `ThinkingContent()` / `ToolUseBlocks()` 辅助方法
+- Gateway: `adaptAnthropic`/`adaptPassthrough` 提取 `applyCommonFields` 消除重复
+- Gateway: 流式 token 提取 OpenAI/Anthropic 分路径 + 字符串预检优化
+- CGO: 5 个 Rust FFI 包添加 `//go:build cgo` + `!cgo` stub
+
 ### v0.4.0 (2026-04-10) — Anthropic 原生格式支持
 
-- 新增 `ChatMessages()` 同步调用 Anthropic 原生端点 (`POST /:id/messages`)
+- 新增 `ChatMessages()` 同步调用 Anthropic 原生端点 (`POST /:id/anthropic`)
 - 新增 `ChatMessagesStream()` 流式调用 Anthropic 原生端点
 - 新增 `AnthropicResponse` / `AnthropicContentBlock` / `AnthropicUsage` 类型
 - 新增 `AnthropicResponse.TextContent()` 便捷方法

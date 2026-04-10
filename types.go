@@ -269,7 +269,7 @@ type ChatResponse struct {
 }
 
 // AnthropicResponse Anthropic 原生格式同步响应
-// POST /managed-models/:id/messages 返回此格式 (无 response.Success 包装)
+// POST /managed-models/:id/anthropic 返回此格式 (无 response.Success 包装)
 type AnthropicResponse struct {
 	ID           string                   `json:"id"`
 	Type         string                   `json:"type"`            // "message"
@@ -283,18 +283,20 @@ type AnthropicResponse struct {
 
 // AnthropicContentBlock Anthropic 内容块
 type AnthropicContentBlock struct {
-	Type    string `json:"type"`              // "text" | "thinking" | "tool_use"
-	Text    string `json:"text,omitempty"`
-	ID      string `json:"id,omitempty"`      // tool_use block ID
-	Name    string `json:"name,omitempty"`    // tool_use function name
-	Input   json.RawMessage `json:"input,omitempty"` // tool_use arguments
-	Thinking string `json:"thinking,omitempty"` // thinking block content
+	Type     string          `json:"type"`                        // "text" | "thinking" | "tool_use"
+	Text     string          `json:"text,omitempty"`
+	ID       string          `json:"id,omitempty"`                // tool_use block ID
+	Name     string          `json:"name,omitempty"`              // tool_use function name
+	Input    json.RawMessage `json:"input,omitempty"`             // tool_use arguments
+	Thinking string          `json:"thinking,omitempty"`          // thinking block content
 }
 
 // AnthropicUsage Anthropic token 用量
 type AnthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }
 
 // TextContent 提取所有 text 类型内容块的文本，拼接返回
@@ -306,6 +308,28 @@ func (r *AnthropicResponse) TextContent() string {
 		}
 	}
 	return strings.Join(parts, "")
+}
+
+// ThinkingContent 提取所有 thinking 类型内容块的文本，拼接返回
+func (r *AnthropicResponse) ThinkingContent() string {
+	var parts []string
+	for _, b := range r.Content {
+		if b.Type == "thinking" && b.Thinking != "" {
+			parts = append(parts, b.Thinking)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// ToolUseBlocks 返回所有 tool_use 类型的内容块
+func (r *AnthropicResponse) ToolUseBlocks() []AnthropicContentBlock {
+	var blocks []AnthropicContentBlock
+	for _, b := range r.Content {
+		if b.Type == "tool_use" {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks
 }
 
 // StreamEvent SSE 流式事件

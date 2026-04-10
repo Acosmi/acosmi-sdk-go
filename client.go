@@ -489,7 +489,7 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 }
 
 // ChatMessages Anthropic 原生格式同步聊天
-// 调用 POST /managed-models/:id/messages，响应为 Anthropic 协议格式 (无 response.Success 包装)
+// 调用 POST /managed-models/:id/anthropic，响应为 Anthropic 协议格式 (无 response.Success 包装)
 func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatRequest) (*AnthropicResponse, error) {
 	req.Stream = false
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
@@ -502,14 +502,14 @@ func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatReque
 		return nil, fmt.Errorf("build chat request: %w", err)
 	}
 	var resp AnthropicResponse
-	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/messages", json.RawMessage(body), &resp); err != nil {
+	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(body), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
 // ChatMessagesStream Anthropic 原生格式流式聊天 (SSE)
-// 调用 POST /managed-models/:id/messages，SSE 事件为 Anthropic 协议格式
+// 调用 POST /managed-models/:id/anthropic，SSE 事件为 Anthropic 协议格式
 // 无 started/settled/failed 自定义事件，无 data: [DONE]，message_stop 为自然结束
 func (c *Client) ChatMessagesStream(ctx context.Context, modelID string, req ChatRequest) (<-chan StreamEvent, <-chan error) {
 	eventCh := make(chan StreamEvent, 32)
@@ -542,7 +542,7 @@ func (c *Client) chatMessagesStreamInternal(ctx context.Context, modelID string,
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/messages"),
+		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/anthropic"),
 		bytes.NewReader(body))
 	if err != nil {
 		errCh <- err
@@ -572,7 +572,7 @@ func (c *Client) chatMessagesStreamInternal(ctx context.Context, modelID string,
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		errCh <- fmt.Errorf("messages stream: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		errCh <- parseHTTPError(resp.StatusCode, bodyBytes)
 		return
 	}
 
@@ -663,7 +663,7 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	if resp.StatusCode != http.StatusOK {
 		// 根因修复 #4: 限制错误响应体大小
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		errCh <- fmt.Errorf("stream: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		errCh <- parseHTTPError(resp.StatusCode, bodyBytes)
 		return
 	}
 
@@ -1112,7 +1112,7 @@ func (c *Client) DownloadSkill(ctx context.Context, skillID string) ([]byte, str
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		return nil, "", fmt.Errorf("download skill: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, "", fmt.Errorf("download skill: %w", parseHTTPError(resp.StatusCode, bodyBytes))
 	}
 
 	// 根因修复 #5: 限制最大下载体积
@@ -1194,7 +1194,7 @@ func (c *Client) uploadSkillInternal(ctx context.Context, zipData []byte, scope,
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		return nil, fmt.Errorf("upload: HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("upload: %w", parseHTTPError(resp.StatusCode, bodyBytes))
 	}
 
 	var result struct {
@@ -1347,7 +1347,7 @@ func (c *Client) doJSONFullInternal(ctx context.Context, method, path string, bo
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, parseHTTPError(resp.StatusCode, bodyBytes)
 	}
 
 	if result != nil {
@@ -1361,6 +1361,30 @@ func (c *Client) doJSONFullInternal(ctx context.Context, method, path string, bo
 		}
 	}
 	return resp.Header, nil
+}
+
+// parseHTTPError 解析 HTTP 错误响应体，兼容 Anthropic 和 OpenAI 错误格式
+// Anthropic: {"type":"error","error":{"type":"...","message":"..."}}
+// OpenAI:    {"error":{"message":"...","type":"...","code":"..."}}
+// 通用回退: HTTP {status}: {body}
+func parseHTTPError(statusCode int, body []byte) error {
+	if len(body) == 0 {
+		return fmt.Errorf("HTTP %d", statusCode)
+	}
+	var obj map[string]interface{}
+	if json.Unmarshal(body, &obj) == nil {
+		// Anthropic 格式: {"type":"error","error":{"type":"...","message":"..."}}
+		if errObj, ok := obj["error"].(map[string]interface{}); ok {
+			if msg, ok := errObj["message"].(string); ok {
+				errType, _ := errObj["type"].(string)
+				if errType != "" {
+					return fmt.Errorf("HTTP %d: [%s] %s", statusCode, errType, msg)
+				}
+				return fmt.Errorf("HTTP %d: %s", statusCode, msg)
+			}
+		}
+	}
+	return fmt.Errorf("HTTP %d: %s", statusCode, string(body))
 }
 
 // 根因修复 #3: doJSON 增加 retried 参数, 401 重试只允许一次, 防无限递归栈溢出
@@ -1409,7 +1433,7 @@ func (c *Client) doPublicJSON(ctx context.Context, method, path string, body int
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+		return parseHTTPError(resp.StatusCode, bodyBytes)
 	}
 
 	if result != nil {
