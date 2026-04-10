@@ -351,7 +351,20 @@ if err := <-errCh; err != nil {
 | 响应格式 | `ChatResponse` (Choices) | `AnthropicResponse` (Content Blocks) |
 | 流式控制事件 | started/settled/pending_settle/failed/[DONE] | 无 (message_stop 自然结束) |
 | 错误格式 | `{"code":N,"message":"..."}` | `{"type":"error","error":{...}}` |
-| Provider 限制 | 所有 provider | Anthropic + 支持 Anthropic 格式的 provider (需端点支持) |
+| Provider 限制 | 所有 provider | Anthropic + 支持 Anthropic 格式的 provider (见下表) |
+
+**Gateway Anthropic 端点映射** (无自定义端点时使用默认值):
+
+| Provider | Anthropic 格式端点 | 状态 |
+|----------|-------------------|------|
+| Anthropic | `https://api.anthropic.com/v1/messages` | ✅ 原生 |
+| DeepSeek | `https://api.deepseek.com/anthropic` | ✅ 支持 |
+| DashScope (Qwen) | `https://dashscope.aliyuncs.com/apps/anthropic` | ✅ 支持 |
+| Zhipu (GLM) | `https://open.bigmodel.cn/api/anthropic` | ✅ 支持 |
+| VolcEngine (豆包) | — | ❌ 无 Anthropic 端点，需自定义 |
+| Custom | 管理员自定义端点 | 取决于配置 |
+
+> 注: 管理员可通过自定义端点覆盖默认值。无 Anthropic 端点的 provider 使用 `/anthropic` 路由会回退到 OpenAI 端点（可能 404）。
 
 #### 扩展字段 (CrabCode)
 
@@ -1131,6 +1144,8 @@ make install    # → $GOPATH/bin
 - Gateway: `adaptAnthropic`/`adaptPassthrough` 提取 `applyCommonFields` 消除重复
 - Gateway: 流式 token 提取 OpenAI/Anthropic 分路径 + 字符串预检优化
 - CGO: 5 个 Rust FFI 包添加 `//go:build cgo` + `!cgo` stub
+- **fix(endpoint)**: 新增 `providerAnthropicEndpoints` 映射 — DeepSeek/DashScope/Zhipu 各自 Anthropic 端点，修复 Chat() 调用 /anthropic 时上游 404
+- Gateway: `ResolveEndpoint` 增加 `anthropicFormat` 参数，Anthropic 端点表优先 + 回退警告日志
 
 ### v0.4.0 (2026-04-10) — Anthropic 原生格式支持
 
