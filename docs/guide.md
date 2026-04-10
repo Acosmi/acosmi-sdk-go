@@ -1160,7 +1160,7 @@ make install    # → $GOPATH/bin
 - 新增 `getModelProvider()` — 从模型缓存获取 provider，默认回退 "anthropic"
 - 新增 `openAIStreamConverter` — OpenAI SSE → Anthropic 事件转换 (thinking/text/tool_calls)
 - 新增 `parseOpenAIResponseToAnthropic()` — OpenAI 响应 → AnthropicResponse
-- 新增 `OpenAIChatResponse` / `OpenAIStreamChunk` 等 7 个 OpenAI 响应类型
+- 新增 10 个 OpenAI 响应类型: `OpenAIChatResponse` / `OpenAIChatChoice` / `OpenAIChatMessage` / `OpenAIToolCall` / `OpenAIFunctionCall` / `OpenAIUsage` / `OpenAIStreamChunk` / `OpenAIStreamChoice` / `OpenAIStreamDelta` / `OpenAIStreamToolCall`
 - CrabCode `filterAnthropicModels` → `filterSupportedModels`: 添加 moonshot/volcengine
 - CrabCode `chatErrorToDetail`: 新增 `invalid_request_error` 检测 (code 3003)
 
