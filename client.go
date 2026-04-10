@@ -368,94 +368,43 @@ func (c *Client) getCachedCapabilities(modelID string) (ModelCapabilities, bool)
 
 // [RC-2] GetModelUsage 已移除: /managed-models/usage 端点已迁移至 tk-dist 营销系统
 
-// buildChatRequest 构建完整的聊天请求体
-// 负责: ServerTools 合入 tools 数组 + ExtraBody 透传 + betas 自动组装
-// CrabClaw 简单调用 (仅 Messages/MaxTokens) 时, 此方法退化为简单序列化
+// getModelProvider 从模型缓存中获取 provider 字段
+// 默认回退 "anthropic"（兼容未调用 ListModels 的场景）
+func (c *Client) getModelProvider(modelID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, m := range c.modelCache {
+		if m.ID == modelID || m.ModelID == modelID {
+			return m.Provider
+		}
+	}
+	return "anthropic" // 默认回退
+}
+
+// buildChatRequest 构建完整的聊天请求体（v0.5.0 adapter 模式）
 //
-// 注意: Beta 自动组装依赖模型能力缓存 (由 ListModels 填充)。
-// 如果 ListModels 从未被调用, 仅注入 claude-code-20250219 基础 beta。
-// CrabCode sdkadapter 启动时应先调用 ListModels() 填充缓存。
-func (c *Client) buildChatRequest(modelID string, req *ChatRequest) ([]byte, error) {
-	body := make(map[string]interface{})
-
-	// 消息: RawMessages 优先于 Messages
-	if req.RawMessages != nil {
-		body["messages"] = req.RawMessages
-	} else if len(req.Messages) > 0 {
-		body["messages"] = req.Messages
-	}
-
-	body["stream"] = req.Stream
-
-	if req.MaxTokens > 0 {
-		body["max_tokens"] = req.MaxTokens
-	}
-	if req.System != nil {
-		body["system"] = req.System
-	}
-	if req.Temperature != nil {
-		body["temperature"] = *req.Temperature
-	}
-	if req.Thinking != nil {
-		body["thinking"] = req.Thinking
-	}
-	if req.Metadata != nil {
-		body["metadata"] = req.Metadata
-	}
-
-	// ── 合入 Tools + ServerTools ──
-	var allTools []interface{}
-	if req.Tools != nil {
-		// Tools 可能是 []interface{} 或 []map 或其他切片类型
-		if toolsJSON, err := json.Marshal(req.Tools); err == nil {
-			var parsed []interface{}
-			if json.Unmarshal(toolsJSON, &parsed) == nil {
-				allTools = append(allTools, parsed...)
-			}
-		}
-	}
-	for _, st := range req.ServerTools {
-		schema := map[string]interface{}{
-			"type": st.Type,
-			"name": st.Name,
-		}
-		for k, v := range st.Config {
-			schema[k] = v
-		}
-		allTools = append(allTools, schema)
-	}
-	if len(allTools) > 0 {
-		body["tools"] = allTools
-	}
-
-	// ── 推理控制 ──
-	if req.Speed != "" {
-		body["speed"] = req.Speed
-	}
-	if req.Effort != nil {
-		body["effort"] = req.Effort
-	}
-	if req.OutputConfig != nil {
-		body["output_config"] = req.OutputConfig
-	}
-
-	// ── Beta 自动组装 ──
+// 根据 provider 选择 adapter，委托 BuildRequestBody 构建格式化的请求体。
+// Anthropic provider → AnthropicAdapter（含 betas/ServerTools）
+// 其他 provider     → OpenAIAdapter（无 betas，扩展字段透传）
+//
+// 返回: (请求体 JSON, 使用的 adapter, 错误)
+func (c *Client) buildChatRequest(modelID string, req *ChatRequest) ([]byte, ProviderAdapter, error) {
+	provider := c.getModelProvider(modelID)
+	adapter := getAdapter(provider)
 	caps, _ := c.getCachedCapabilities(modelID)
-	betas := buildBetas(caps, req)
-	if len(betas) > 0 {
-		body["betas"] = betas
+
+	body, err := adapter.BuildRequestBody(caps, req)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// ── 透传 ExtraBody ──
-	for k, v := range req.ExtraBody {
-		body[k] = v
-	}
-
-	return json.Marshal(body)
+	data, err := json.Marshal(body)
+	return data, adapter, err
 }
 
 // Chat 同步聊天 (适合短回复)
 // 响应的 TokenRemaining / CallRemaining 字段来自服务端 Header，反映结算后余额
+// v0.5.0: 根据 provider 自动路由到 /anthropic 或 /chat 端点
 func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*ChatResponse, error) {
 	req.Stream = false
 	// Chat 请求可能 30-120s+，使用 5 分钟超时而非默认 30s
@@ -464,17 +413,29 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 	}
-	body, err := c.buildChatRequest(modelID, &req)
+
+	// 使用 adapter 构建请求
+	body, adapter, err := c.buildChatRequest(modelID, &req)
 	if err != nil {
 		return nil, fmt.Errorf("build chat request: %w", err)
 	}
-	var resp ChatResponse
-	resp.TokenRemaining = -1
-	resp.CallRemaining = -1
-	headers, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(body), &resp)
+
+	// 根据 adapter 选择端点
+	endpoint := "/managed-models/" + url.PathEscape(modelID) + adapter.EndpointSuffix()
+
+	var raw json.RawMessage
+	headers, err := c.doJSONFull(ctx, http.MethodPost, endpoint, json.RawMessage(body), &raw)
 	if err != nil {
 		return nil, err
 	}
+
+	// 使用 adapter 解析响应
+	resp, err := adapter.ParseResponse(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	// 从 Header 提取 token 余额
 	if v := headers.Get("X-Token-Remaining"); v != "" {
 		if n, parseErr := strconv.ParseInt(v, 10, 64); parseErr == nil {
 			resp.TokenRemaining = n
@@ -485,27 +446,47 @@ func (c *Client) Chat(ctx context.Context, modelID string, req ChatRequest) (*Ch
 			resp.CallRemaining = n
 		}
 	}
-	return &resp, nil
+	return resp, nil
 }
 
 // ChatMessages Anthropic 原生格式同步聊天
+// v0.5.0: 根据 provider 自动路由
+//   Anthropic → chatMessagesAnthropic（现有路径，POST /anthropic）
+//   其他厂商 → chatMessagesOpenAI（POST /chat，响应转换为 AnthropicResponse）
+func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatRequest) (*AnthropicResponse, error) {
+	provider := c.getModelProvider(modelID)
+	adapter := getAdapter(provider)
+
+	if adapter.Format() == FormatAnthropic {
+		return c.chatMessagesAnthropic(ctx, modelID, req, adapter)
+	}
+	return c.chatMessagesOpenAI(ctx, modelID, req, adapter)
+}
+
+// chatMessagesAnthropic Anthropic 原生格式同步聊天（现有逻辑）
 // 调用 POST /managed-models/:id/anthropic
 // 兼容两种响应格式: 裸 Anthropic JSON 或 {"code":0,"data":{...}} APIResponse 包装
-func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatRequest) (*AnthropicResponse, error) {
+func (c *Client) chatMessagesAnthropic(ctx context.Context, modelID string, req ChatRequest, adapter ProviderAdapter) (*AnthropicResponse, error) {
 	req.Stream = false
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 	}
-	body, err := c.buildChatRequest(modelID, &req)
+
+	caps, _ := c.getCachedCapabilities(modelID)
+	body, err := adapter.BuildRequestBody(caps, &req)
 	if err != nil {
 		return nil, fmt.Errorf("build chat request: %w", err)
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chat request: %w", err)
 	}
 
 	// 用 json.RawMessage 接收原始 JSON，以兼容两种响应格式
 	var raw json.RawMessage
-	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(body), &raw); err != nil {
+	if _, err := c.doJSONFull(ctx, http.MethodPost, "/managed-models/"+url.PathEscape(modelID)+"/anthropic", json.RawMessage(data), &raw); err != nil {
 		return nil, err
 	}
 
@@ -534,6 +515,38 @@ func (c *Client) ChatMessages(ctx context.Context, modelID string, req ChatReque
 	return &resp, nil
 }
 
+// chatMessagesOpenAI 非 Anthropic 厂商同步聊天
+// 走 OpenAI 格式端点，响应转换为 AnthropicResponse 返回
+// 使 Hub 层无需感知 provider 差异
+func (c *Client) chatMessagesOpenAI(ctx context.Context, modelID string, req ChatRequest, adapter ProviderAdapter) (*AnthropicResponse, error) {
+	req.Stream = false
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
+
+	caps, _ := c.getCachedCapabilities(modelID)
+	body, err := adapter.BuildRequestBody(caps, &req)
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := "/managed-models/" + url.PathEscape(modelID) + adapter.EndpointSuffix()
+
+	var raw json.RawMessage
+	if _, err := c.doJSONFull(ctx, http.MethodPost, endpoint, json.RawMessage(data), &raw); err != nil {
+		return nil, err
+	}
+
+	// 解析 OpenAI 格式响应并转换为 AnthropicResponse
+	return parseOpenAIResponseToAnthropic(raw)
+}
+
 // ChatMessagesStream Anthropic 原生格式流式聊天 (SSE)
 // 调用 POST /managed-models/:id/anthropic，SSE 事件为 Anthropic 协议格式
 // 无 started/settled/failed 自定义事件，无 data: [DONE]，message_stop 为自然结束
@@ -550,12 +563,15 @@ func (c *Client) ChatMessagesStream(ctx context.Context, modelID string, req Cha
 	return eventCh, errCh
 }
 
-// chatMessagesStreamInternal Anthropic 格式流式内部实现
+// chatMessagesStreamInternal 流式内部实现
+// v0.5.0: 根据 adapter 路由端点 + SSE 格式解析
+//   Anthropic → /anthropic 端点，原生 SSE 事件直透
+//   OpenAI    → /chat 端点，OpenAI SSE 转换为 Anthropic 兼容事件
 func (c *Client) chatMessagesStreamInternal(ctx context.Context, modelID string, req ChatRequest,
 	eventCh chan<- StreamEvent, errCh chan<- error, retried bool) {
 
 	req.Stream = true
-	body, buildErr := c.buildChatRequest(modelID, &req)
+	body, adapter, buildErr := c.buildChatRequest(modelID, &req)
 	if buildErr != nil {
 		errCh <- buildErr
 		return
@@ -567,8 +583,11 @@ func (c *Client) chatMessagesStreamInternal(ctx context.Context, modelID string,
 		return
 	}
 
+	// 根据 adapter 选择端点
+	endpoint := "/managed-models/" + url.PathEscape(modelID) + adapter.EndpointSuffix()
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/anthropic"),
+		c.apiURL(endpoint),
 		bytes.NewReader(body))
 	if err != nil {
 		errCh <- err
@@ -605,15 +624,40 @@ func (c *Client) chatMessagesStreamInternal(ctx context.Context, modelID string,
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, maxSSELineSize), maxSSELineSize)
 
-	var currentEvent string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event:") {
-			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "data:") {
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			eventCh <- StreamEvent{Event: currentEvent, Data: data}
-			// Anthropic 流无 [DONE]，message_stop 事件后上游关闭连接
+	if adapter.Format() == FormatOpenAI {
+		// OpenAI SSE: 转换为 Anthropic 兼容事件
+		converter := newOpenAIStreamConverter()
+		var currentEvent string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if after, ok := strings.CutPrefix(line, "event:"); ok {
+				currentEvent = strings.TrimSpace(after)
+				_ = currentEvent // OpenAI SSE 通常没有 event: 行
+			} else if after, ok := strings.CutPrefix(line, "data:"); ok {
+				data := strings.TrimSpace(after)
+				events, done, parseErr := converter.Convert(data)
+				if parseErr != nil {
+					errCh <- parseErr
+					return
+				}
+				for _, evt := range events {
+					eventCh <- evt
+				}
+				if done {
+					return
+				}
+			}
+		}
+	} else {
+		// Anthropic SSE: 原生事件直透
+		var currentEvent string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if after, ok := strings.CutPrefix(line, "event:"); ok {
+				currentEvent = strings.TrimSpace(after)
+			} else if after, ok := strings.CutPrefix(line, "data:"); ok {
+				eventCh <- StreamEvent{Event: currentEvent, Data: strings.TrimSpace(after)}
+			}
 		}
 	}
 
@@ -638,6 +682,7 @@ func (c *Client) ChatStream(ctx context.Context, modelID string, req ChatRequest
 }
 
 // chatStreamInternal 流式聊天内部实现
+// v0.5.0: 根据 adapter 路由端点
 // 根因修复 #7: ChatStream 支持 401 单次重试
 // 根因修复 #4: 错误响应体使用 LimitReader 防 OOM
 // 根因修复 #13: SSE scanner 使用 1MB 缓冲区, 防 ErrTooLong
@@ -645,7 +690,7 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	eventCh chan<- StreamEvent, errCh chan<- error, retried bool) {
 
 	req.Stream = true
-	body, buildErr := c.buildChatRequest(modelID, &req)
+	body, adapter, buildErr := c.buildChatRequest(modelID, &req)
 	if buildErr != nil {
 		errCh <- buildErr
 		return
@@ -657,8 +702,11 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 		return
 	}
 
+	// 根据 adapter 选择端点
+	endpoint := "/managed-models/" + url.PathEscape(modelID) + adapter.EndpointSuffix()
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.apiURL("/managed-models/"+url.PathEscape(modelID)+"/anthropic"),
+		c.apiURL(endpoint),
 		bytes.NewReader(body))
 	if err != nil {
 		errCh <- err
@@ -700,14 +748,19 @@ func (c *Client) chatStreamInternal(ctx context.Context, modelID string, req Cha
 	var currentEvent string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "event:") {
-			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "data:") {
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "[DONE]" {
+		if after, ok := strings.CutPrefix(line, "event:"); ok {
+			currentEvent = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "data:"); ok {
+			// 使用 adapter 解析每行
+			evt, done, parseErr := adapter.ParseStreamLine(currentEvent, strings.TrimSpace(after))
+			if parseErr != nil {
+				errCh <- parseErr
 				return
 			}
-			eventCh <- StreamEvent{Event: currentEvent, Data: data}
+			if done {
+				return
+			}
+			eventCh <- evt
 		}
 	}
 

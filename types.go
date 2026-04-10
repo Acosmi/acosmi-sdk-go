@@ -275,6 +275,83 @@ func ParseSourcesEvent(ev StreamEvent) *SourcesEvent {
 	return &SourcesEvent{Sources: wrapper.Sources, SessionID: wrapper.SID}
 }
 
+// ---------- OpenAI 兼容响应类型 (非 Anthropic 厂商) ----------
+
+// OpenAIChatResponse — OpenAI /chat/completions 同步响应
+type OpenAIChatResponse struct {
+	ID      string           `json:"id"`
+	Object  string           `json:"object"` // "chat.completion"
+	Model   string           `json:"model"`
+	Choices []OpenAIChatChoice `json:"choices"`
+	Usage   OpenAIUsage      `json:"usage"`
+}
+
+// OpenAIChatChoice — OpenAI 同步响应中的单个选项
+type OpenAIChatChoice struct {
+	Index        int              `json:"index"`
+	Message      OpenAIChatMessage `json:"message"`
+	FinishReason string           `json:"finish_reason"` // "stop", "tool_calls", "length"
+}
+
+// OpenAIChatMessage — OpenAI 同步响应中的消息体
+type OpenAIChatMessage struct {
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"` // GLM/DeepSeek thinking
+}
+
+// OpenAIToolCall — OpenAI tool_call 结构
+type OpenAIToolCall struct {
+	ID       string             `json:"id"`
+	Type     string             `json:"type"` // "function"
+	Function OpenAIFunctionCall `json:"function"`
+}
+
+// OpenAIFunctionCall — OpenAI function call 内容
+type OpenAIFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// OpenAIUsage — OpenAI token 用量
+type OpenAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// OpenAIStreamChunk — OpenAI SSE delta 格式
+type OpenAIStreamChunk struct {
+	ID      string               `json:"id"`
+	Object  string               `json:"object"` // "chat.completion.chunk"
+	Choices []OpenAIStreamChoice `json:"choices"`
+	Usage   *OpenAIUsage         `json:"usage,omitempty"`
+}
+
+// OpenAIStreamChoice — OpenAI 流式响应中的单个选项
+type OpenAIStreamChoice struct {
+	Index        int              `json:"index"`
+	Delta        OpenAIStreamDelta `json:"delta"`
+	FinishReason *string          `json:"finish_reason"`
+}
+
+// OpenAIStreamDelta — OpenAI 流式增量内容
+type OpenAIStreamDelta struct {
+	Role             string                 `json:"role,omitempty"`
+	Content          string                 `json:"content,omitempty"`
+	ReasoningContent string                 `json:"reasoning_content,omitempty"`
+	ToolCalls        []OpenAIStreamToolCall `json:"tool_calls,omitempty"`
+}
+
+// OpenAIStreamToolCall — OpenAI 流式 tool_call 增量
+type OpenAIStreamToolCall struct {
+	Index    int                `json:"index"`
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function OpenAIFunctionCall `json:"function"`
+}
+
 // ChatResponse 同步聊天响应 (Anthropic format, v0.4.1)
 type ChatResponse struct {
 	ID         string             `json:"id"`
