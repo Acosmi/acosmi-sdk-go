@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.4.1 | Go 1.22+ | MIT
+> v0.5.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -39,8 +39,9 @@ Acosmi Go SDK 提供两种使用方式:
 | OAuth 2.1 PKCE | 安全桌面授权，自动 token 刷新 |
 | 统一客户端 | 一个 `Client` 覆盖全域 API |
 | 流式聊天 | SSE 实时对话 + 结算余额推送 |
-| Beta 自动组装 | 根据模型能力自动注入 11 项 beta header |
-| Server Tool | 联网搜索等服务端工具自动合入请求体 |
+| 多厂商 Adapter | per-provider 路由: Anthropic 格式 / OpenAI 兼容格式自动切换 |
+| Beta 自动组装 | 根据模型能力自动注入 11 项 beta header (仅 Anthropic 格式) |
+| Server Tool | 联网搜索等服务端工具自动合入请求体 (仅 Anthropic 格式) |
 | 模型能力矩阵 | 17 项能力标记，驱动 UI 功能开关 |
 | WebSocket | 实时余额/技能/系统推送，自动断线重连 |
 | 线程安全 | `sync.RWMutex` 保护所有共享状态 |
@@ -299,8 +300,11 @@ for event := range eventCh {
 
 #### Anthropic 原生格式 — ChatMessages (V8)
 
-调用 `POST /managed-models/:id/anthropic`，请求/响应均为 Anthropic 协议格式。
-适用于 CrabCode 等需要 Anthropic 原生格式的场景。
+v0.5.0: 根据模型 provider 自动路由:
+- **Anthropic/Acosmi** → `POST /managed-models/:id/anthropic` (Anthropic 协议)
+- **其他厂商** → `POST /managed-models/:id/chat` (OpenAI 兼容格式，响应自动转换为 AnthropicResponse)
+
+调用方无需感知 provider 差异，SDK 内部自动处理格式转换。
 
 **同步调用:**
 
@@ -346,25 +350,26 @@ if err := <-errCh; err != nil {
 
 | | Chat / ChatStream | ChatMessages / ChatMessagesStream |
 |---|---|---|
-| 端点 | `/:id/chat` | `/:id/anthropic` |
+| 端点 | 按 provider 自动路由 | 按 provider 自动路由 |
 | 请求类型 | `ChatRequest` (统一) | `ChatRequest` (统一) |
-| 响应格式 | `ChatResponse` (Choices) | `AnthropicResponse` (Content Blocks) |
-| 流式控制事件 | started/settled/pending_settle/failed/[DONE] | 无 (message_stop 自然结束) |
-| 错误格式 | `{"code":N,"message":"..."}` | `{"type":"error","error":{...}}` |
-| Provider 限制 | 所有 provider | Anthropic + 支持 Anthropic 格式的 provider (见下表) |
+| 响应格式 | `ChatResponse` | `AnthropicResponse` (Content Blocks) |
+| 流式控制事件 | started/settled/pending_settle/failed/[DONE] | Anthropic SSE (message_stop 自然结束) |
+| Provider 限制 | 所有 provider | 所有 provider (v0.5.0 Adapter 自动转换) |
 
-**Gateway Anthropic 端点映射** (无自定义端点时使用默认值):
+**v0.5.0 Provider Adapter 路由规则:**
 
-| Provider | Anthropic 格式端点 | 状态 |
-|----------|-------------------|------|
-| Anthropic | `https://api.anthropic.com/v1/messages` | ✅ 原生 |
-| DeepSeek | `https://api.deepseek.com/anthropic` | ✅ 支持 |
-| DashScope (Qwen) | `https://dashscope.aliyuncs.com/apps/anthropic` | ✅ 支持 |
-| Zhipu (GLM) | `https://open.bigmodel.cn/api/anthropic` | ✅ 支持 |
-| VolcEngine (豆包) | — | ❌ 无 Anthropic 端点，需自定义 |
-| Custom | 管理员自定义端点 | 取决于配置 |
+| Provider | Adapter | 端点后缀 | Betas 注入 | SSE 格式 |
+|----------|---------|----------|-----------|---------|
+| Anthropic | AnthropicAdapter | `/anthropic` | 是 (11 项) | Anthropic 原生 |
+| Acosmi | AnthropicAdapter | `/anthropic` | 是 | Anthropic 原生 |
+| DeepSeek | OpenAIAdapter | `/chat` | 否 | OpenAI → Anthropic 转换 |
+| DashScope (Qwen) | OpenAIAdapter | `/chat` | 否 | OpenAI → Anthropic 转换 |
+| Zhipu (GLM) | OpenAIAdapter | `/chat` | 否 | OpenAI → Anthropic 转换 |
+| Moonshot (Kimi) | OpenAIAdapter | `/chat` | 否 | OpenAI → Anthropic 转换 |
+| VolcEngine (豆包) | OpenAIAdapter | `/chat` | 否 | OpenAI → Anthropic 转换 |
+| 其他 | OpenAIAdapter | `/chat` | 否 | OpenAI → Anthropic 转换 |
 
-> 注: 管理员可通过自定义端点覆盖默认值。无 Anthropic 端点的 provider 使用 `/anthropic` 路由会回退到 OpenAI 端点（可能 404）。
+> 注: OpenAIAdapter 不注入 Anthropic betas，扩展字段 (thinking/effort/speed) 以通用 JSON 透传给 Nexus Gateway，由 Gateway per-provider adapter 转换为厂商格式。
 
 #### 扩展字段 (CrabCode)
 
@@ -1092,17 +1097,20 @@ Token 文件: 目录 `0700`，文件 `0600`。下载限制 50MB。
 
 ```
 acosmi-sdk-go/
-├── client.go          # 统一 API 客户端 + buildChatRequest
-├── auth.go            # OAuth 2.1 PKCE
-├── types.go           # 数据类型 (含 v0.2+ 扩展)
-├── betas.go           # Beta Header 自动组装 (11 项)
-├── store.go           # Token 持久化
-├── scopes.go          # Scope 常量
-├── ws.go              # WebSocket (自动重连)
-├── cmd/crabclawskill/ # CLI (13 个子命令)
-├── npm/               # NPM 包装
-├── docs/guide.md      # 本手册
-└── example/main.go    # 完整示例
+├── adapter.go             # ProviderAdapter 接口 + 注册表 + getAdapter()
+├── adapter_anthropic.go   # Anthropic 格式 adapter (betas/ServerTools/ExtraBody)
+├── adapter_openai.go      # OpenAI 兼容格式 adapter + 响应/流式转换
+├── client.go              # 统一 API 客户端 + buildChatRequest (委托 adapter)
+├── auth.go                # OAuth 2.1 PKCE
+├── types.go               # 数据类型 (含 OpenAI 响应类型)
+├── betas.go               # Beta Header 自动组装 (11 项，仅 Anthropic adapter 调用)
+├── store.go               # Token 持久化
+├── scopes.go              # Scope 常量
+├── ws.go                  # WebSocket (自动重连)
+├── cmd/crabclawskill/     # CLI (13 个子命令)
+├── npm/                   # NPM 包装
+├── docs/guide.md          # 本手册
+└── example/main.go        # 完整示例
 ```
 
 ---
@@ -1140,6 +1148,21 @@ make install    # → $GOPATH/bin
 ---
 
 ## 12. 版本记录
+
+### v0.5.0 (2026-04-11) — 多厂商 Provider Adapter
+
+- **feat(adapter)**: 新增 ProviderAdapter 接口 — per-provider 路由 + 格式转换
+  - `AnthropicAdapter`: `/anthropic` 端点，完整 betas/ServerTools 注入
+  - `OpenAIAdapter`: `/chat` 端点，无 betas，扩展字段透传 Gateway
+- `buildChatRequest` 委托 adapter，返回 `([]byte, ProviderAdapter, error)`
+- `Chat()` / `ChatMessages()` / `ChatStream()` / `ChatMessagesStream()` 全部按 provider 路由
+- `ChatMessages()` 拆分为 `chatMessagesAnthropic()` / `chatMessagesOpenAI()`
+- 新增 `getModelProvider()` — 从模型缓存获取 provider，默认回退 "anthropic"
+- 新增 `openAIStreamConverter` — OpenAI SSE → Anthropic 事件转换 (thinking/text/tool_calls)
+- 新增 `parseOpenAIResponseToAnthropic()` — OpenAI 响应 → AnthropicResponse
+- 新增 `OpenAIChatResponse` / `OpenAIStreamChunk` 等 7 个 OpenAI 响应类型
+- CrabCode `filterAnthropicModels` → `filterSupportedModels`: 添加 moonshot/volcengine
+- CrabCode `chatErrorToDetail`: 新增 `invalid_request_error` 检测 (code 3003)
 
 ### v0.4.1 (2026-04-10) — 全量审计修复
 
