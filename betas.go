@@ -3,7 +3,6 @@ package acosmi
 // Beta Header 常量 — 经联网验证的真实 Anthropic API beta 值
 // 虚构/错误日期的 header 已剔除 (task-budgets / advisor-tool / cache-editing / web-search beta)
 const (
-	betaClaudeCode          = "claude-code-20250219"              // 始终: 代理标识
 	betaInterleavedThinking = "interleaved-thinking-2025-05-14"   // ISP: 交错思考
 	betaContext1M           = "context-1m-2025-08-07"             // 1M 上下文 (retiring 2026-04-30)
 	betaContextManagement   = "context-management-2025-06-27"     // 上下文编辑
@@ -19,7 +18,7 @@ const (
 // buildBetas 根据模型能力和请求参数自动组装 beta header 列表
 // 内部方法, 在 buildChatRequest 中调用
 func buildBetas(caps ModelCapabilities, req *ChatRequest) []string {
-	betas := []string{betaClaudeCode} // 始终包含
+	var betas []string
 
 	// ── 思考相关 ──
 	if caps.SupportsISP {

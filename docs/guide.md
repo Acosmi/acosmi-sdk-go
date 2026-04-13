@@ -415,7 +415,6 @@ eventCh, errCh := client.ChatStream(ctx, modelID, acosmi.ChatRequest{
 
 | Beta | 条件 |
 |------|------|
-| `claude-code-20250219` | 始终 |
 | `interleaved-thinking-2025-05-14` | 支持 ISP |
 | `context-management-2025-06-27` | 支持 ISP |
 | `context-1m-2025-08-07` | 支持 1M |
@@ -552,6 +551,68 @@ client.IsConnected() // 检查状态
 | `reg_bonus` | 注册奖励发放 |
 | `claim_monthly` | 月度免费 Token 领取 |
 | `unclaimed_reminder` | 当月未领取提醒 |
+
+#### 通知事件解析
+
+```go
+// 从 WSEvent 中解析通知 (返回 nil 表示非通知事件)
+if n := acosmi.ParseNotificationEvent(ev); n != nil {
+    fmt.Printf("新通知: [%s] %s — %s\n", n.Type, n.Title, n.Content)
+}
+```
+
+### 4.9 通知管理
+
+```go
+// 查询通知 (分页 + 类型过滤)
+list, _ := client.ListNotifications(ctx, 1, 20, "")           // 全部
+list, _ := client.ListNotifications(ctx, 1, 20, "billing")    // 仅账单类
+fmt.Printf("共 %d 条, 未读 %d\n", list.Total, list.UnreadCount)
+
+// 获取未读数 (轻量)
+count, _ := client.GetUnreadCount(ctx)
+
+// 标记已读
+client.MarkNotificationRead(ctx, "notif-id-xxx")  // 单条
+client.MarkAllNotificationsRead(ctx)               // 全部
+
+// 删除
+client.DeleteNotification(ctx, "notif-id-xxx")
+```
+
+### 4.10 设备注册 (推送通知)
+
+```go
+// 注册推送 Token (FCM/APNs/鸿蒙推送)
+client.RegisterDevice(ctx, acosmi.DeviceRegistration{
+    Platform:   "android",  // "android" | "ios" | "harmony"
+    Token:      "fcm-token-xxx",
+    AppVersion: "2.0.0",
+})
+
+// 注销设备 (登出时调用)
+client.UnregisterDevice(ctx, "fcm-token-xxx")
+```
+
+### 4.11 通知偏好
+
+```go
+// 查询用户偏好
+prefs, _ := client.ListNotificationPreferences(ctx)
+for _, p := range prefs {
+    fmt.Printf("%s: 站内=%v 邮件=%v 短信=%v 推送=%v\n",
+        p.TypeCode, p.ChannelInApp, p.ChannelEmail, p.ChannelSMS, p.ChannelPush)
+}
+
+// 更新偏好 (关闭短信通知)
+client.UpdateNotificationPreference(ctx, "tk_alert", acosmi.NotificationPreference{
+    TypeCode:     "tk_alert",
+    ChannelInApp: true,
+    ChannelEmail: true,
+    ChannelSMS:   false,
+    ChannelPush:  true,
+})
+```
 
 ---
 
@@ -906,6 +967,28 @@ type WSEvent struct {
 }
 ```
 
+### 通知
+
+```go
+type Notification struct {
+    ID, Title, Content, Type string   // Type: system|billing|security|task|commission|entitlement
+    IsRead bool; CreatedAt string
+}
+type NotificationList struct {
+    List []Notification; UnreadCount, Total int64; Page, PageSize int
+}
+type NotificationUnreadCount struct { UnreadCount int64 }
+type NotificationPreference struct {
+    TypeCode string
+    ChannelInApp, ChannelEmail, ChannelSMS, ChannelPush bool
+}
+type DeviceRegistration struct {
+    Platform string   // android | ios | harmony
+    Token, AppVersion string
+}
+func ParseNotificationEvent(ev WSEvent) *Notification // 返回 nil 表示非通知
+```
+
 ### 错误
 
 ```go
@@ -1148,6 +1231,20 @@ make install    # → $GOPATH/bin
 ---
 
 ## 12. 版本记录
+
+### v0.6.0 (2026-04-13) — 通知系统 + 设备注册
+
+- **feat(notification)**: 新增 9 个通知管理方法
+  - `ListNotifications` / `GetUnreadCount` — 分页查询 + 轻量未读数
+  - `MarkNotificationRead` / `MarkAllNotificationsRead` — 单条/批量已读
+  - `DeleteNotification` — 删除通知
+  - `RegisterDevice` / `UnregisterDevice` — 推送设备 Token 注册/注销
+  - `ListNotificationPreferences` / `UpdateNotificationPreference` — 通知偏好 CRUD
+- **feat(types)**: 新增 6 个类型
+  - `Notification` / `NotificationList` / `NotificationUnreadCount`
+  - `NotificationPreference` / `DeviceRegistration`
+  - `ParseNotificationEvent(WSEvent)` — WebSocket 通知事件解析辅助函数
+- 所有新方法遵循 `doJSON` + `APIResponse[T]` 既有模式，完全向后兼容
 
 ### v0.5.0 (2026-04-11) — 多厂商 Provider Adapter
 

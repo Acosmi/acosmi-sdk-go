@@ -1361,6 +1361,77 @@ func (c *Client) GetTool(ctx context.Context, toolID string) (*ToolView, error) 
 }
 
 // ============================================================================
+// API: Notifications
+// ============================================================================
+
+// ListNotifications 分页查询通知列表
+func (c *Client) ListNotifications(ctx context.Context, page, pageSize int, typeFilter string) (*NotificationList, error) {
+	path := fmt.Sprintf("/notifications?page=%d&pageSize=%d", page, pageSize)
+	if typeFilter != "" {
+		path += "&type=" + url.QueryEscape(typeFilter)
+	}
+	var resp APIResponse[NotificationList]
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp, false); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// GetUnreadCount 获取未读通知数量
+func (c *Client) GetUnreadCount(ctx context.Context) (int64, error) {
+	var resp APIResponse[NotificationUnreadCount]
+	if err := c.doJSON(ctx, http.MethodGet, "/notifications/unread-count", nil, &resp, false); err != nil {
+		return 0, err
+	}
+	return resp.Data.UnreadCount, nil
+}
+
+// MarkNotificationRead 标记单条通知已读
+func (c *Client) MarkNotificationRead(ctx context.Context, id string) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodPut, "/notifications/"+url.PathEscape(id)+"/read", nil, &resp, false)
+}
+
+// MarkAllNotificationsRead 标记全部通知已读
+func (c *Client) MarkAllNotificationsRead(ctx context.Context) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodPut, "/notifications/read-all", nil, &resp, false)
+}
+
+// DeleteNotification 删除通知
+func (c *Client) DeleteNotification(ctx context.Context, id string) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodDelete, "/notifications/"+url.PathEscape(id), nil, &resp, false)
+}
+
+// RegisterDevice 注册推送设备 token
+func (c *Client) RegisterDevice(ctx context.Context, reg DeviceRegistration) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodPost, "/devices/register", reg, &resp, false)
+}
+
+// UnregisterDevice 注销推送设备 token
+func (c *Client) UnregisterDevice(ctx context.Context, token string) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodDelete, "/devices/"+url.PathEscape(token), nil, &resp, false)
+}
+
+// ListNotificationPreferences 获取通知偏好设置
+func (c *Client) ListNotificationPreferences(ctx context.Context) ([]NotificationPreference, error) {
+	var resp APIResponse[[]NotificationPreference]
+	if err := c.doJSON(ctx, http.MethodGet, "/notification-preferences", nil, &resp, false); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// UpdateNotificationPreference 更新通知偏好
+func (c *Client) UpdateNotificationPreference(ctx context.Context, typeCode string, pref NotificationPreference) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodPut, "/notification-preferences/"+url.PathEscape(typeCode), pref, &resp, false)
+}
+
+// ============================================================================
 // Internal HTTP
 // ============================================================================
 

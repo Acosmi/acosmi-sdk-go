@@ -856,3 +856,61 @@ type YudaoPageResult[T any] struct {
 	List  []T   `json:"list"`
 	Total int64 `json:"total"`
 }
+
+// ---------- Notifications ----------
+
+// Notification 单条通知
+type Notification struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Type      string `json:"type"` // system | billing | security | task | commission | entitlement
+	IsRead    bool   `json:"isRead"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// NotificationList 分页通知列表
+type NotificationList struct {
+	List        []Notification `json:"list"`
+	UnreadCount int64          `json:"unreadCount"`
+	Total       int64          `json:"total"`
+	Page        int            `json:"page"`
+	PageSize    int            `json:"pageSize"`
+}
+
+// NotificationUnreadCount 未读通知计数
+type NotificationUnreadCount struct {
+	UnreadCount int64 `json:"unreadCount"`
+}
+
+// NotificationPreference 通知偏好 (按类型+渠道)
+type NotificationPreference struct {
+	TypeCode     string `json:"typeCode"`
+	ChannelInApp bool   `json:"channelInApp"`
+	ChannelEmail bool   `json:"channelEmail"`
+	ChannelSMS   bool   `json:"channelSms"`
+	ChannelPush  bool   `json:"channelPush"`
+}
+
+// DeviceRegistration 推送设备注册
+type DeviceRegistration struct {
+	Platform   string `json:"platform"`   // android | ios | harmony
+	Token      string `json:"token"`
+	AppVersion string `json:"appVersion"`
+}
+
+// ParseNotificationEvent 从 WSEvent 中解析通知
+// 返回 nil 表示该事件不是系统通知
+func ParseNotificationEvent(ev WSEvent) *Notification {
+	if ev.Type != "event" || ev.Topic != "system" {
+		return nil
+	}
+	var n Notification
+	if err := json.Unmarshal(ev.Data, &n); err != nil {
+		return nil
+	}
+	if n.ID == "" {
+		return nil
+	}
+	return &n
+}
