@@ -1061,6 +1061,32 @@ func (c *Client) GetWalletTransactions(ctx context.Context) ([]Transaction, erro
 }
 
 // ============================================================================
+// API: Subscription (scope: entitlements)
+// ============================================================================
+
+// GetSubscriptionType 获取用户订阅层级 (从活跃权益推导)
+// 返回干净的枚举值: free / pro / max / team / enterprise
+// 内部自动处理 claude_* 前缀兼容映射
+func (c *Client) GetSubscriptionType(ctx context.Context) (SubscriptionType, error) {
+	info, err := c.GetSubscriptionInfo(ctx)
+	if err != nil {
+		return SubscriptionFree, err
+	}
+	return normalizeSubscriptionType(string(info.SubscriptionType)), nil
+}
+
+// GetSubscriptionInfo 获取完整订阅信息 (含活跃权益类型列表)
+func (c *Client) GetSubscriptionInfo(ctx context.Context) (*SubscriptionInfo, error) {
+	var resp APIResponse[SubscriptionInfo]
+	if err := c.doJSON(ctx, http.MethodGet, "/entitlements/subscription", nil, &resp, false); err != nil {
+		return nil, err
+	}
+	// 标准化 (兼容历史值)
+	resp.Data.SubscriptionType = normalizeSubscriptionType(string(resp.Data.SubscriptionType))
+	return &resp.Data, nil
+}
+
+// ============================================================================
 // API: Profile (scope: account)
 // ============================================================================
 

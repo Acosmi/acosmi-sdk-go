@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.7.0 | Go 1.22+ | MIT
+> v0.8.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -14,9 +14,10 @@
   - [4.4 权益管理](#44-权益管理)
   - [4.5 流量包商城](#45-流量包商城)
   - [4.6 钱包](#46-钱包)
-  - [4.7 个人资料与账号管理](#47-个人资料与账号管理)
-  - [4.8 技能商店](#48-技能商店)
-  - [4.9 WebSocket 实时推送](#49-websocket-实时推送)
+  - [4.7 订阅层级](#47-订阅层级)
+  - [4.8 个人资料与账号管理](#48-个人资料与账号管理)
+  - [4.9 技能商店](#49-技能商店)
+  - [4.10 WebSocket 实时推送](#410-websocket-实时推送)
 - [5. CLI 命令手册](#5-cli-命令手册)
 - [6. 数据类型参考](#6-数据类型参考)
 - [7. 完整示例](#7-完整示例)
@@ -483,7 +484,30 @@ txns, _ := client.GetWalletTransactions(ctx)      // 交易记录
 
 > 金额使用 `json.Number` 防精度丢失。
 
-### 4.7 个人资料与账号管理
+### 4.7 订阅层级
+
+> scope: `ai` (entitlements)
+
+```go
+// 快捷: 只获取层级枚举
+subType, _ := client.GetSubscriptionType(ctx)
+switch subType {
+case acosmi.SubscriptionPro:
+    fmt.Println("Pro 用户")
+case acosmi.SubscriptionFree:
+    fmt.Println("免费用户")
+}
+
+// 完整: 层级 + 活跃权益类型列表
+info, _ := client.GetSubscriptionInfo(ctx)
+fmt.Printf("层级: %s, 活跃权益: %v\n", info.SubscriptionType, info.ActiveEntitlementTypes)
+```
+
+推导规则: 有 `TOKEN_PACKAGE` → `pro`，否则 → `free`。`max` / `team` / `enterprise` 预留。
+
+> SDK 内部自动处理 `claude_*` 前缀兼容映射（`"claude_max"` → `"max"`），下游无需感知历史字段名。
+
+### 4.8 个人资料与账号管理
 
 > scope: `account`
 
@@ -533,7 +557,7 @@ for _, id := range identities {
 client.UnlinkIdentity(ctx, "identity-id")
 ```
 
-### 4.8 技能商店
+### 4.9 技能商店
 
 ```go
 // 公开 (无需登录)
@@ -567,7 +591,7 @@ tools, _ := client.ListTools(ctx)   // 技能 + 插件合并视图
 tool, _ := client.GetTool(ctx, "tool-id")
 ```
 
-### 4.9 WebSocket 实时推送
+### 4.10 WebSocket 实时推送
 
 ```go
 client.Connect(ctx, acosmi.WSConfig{
@@ -612,7 +636,7 @@ if n := acosmi.ParseNotificationEvent(ev); n != nil {
 }
 ```
 
-### 4.10 通知管理
+### 4.11 通知管理
 
 ```go
 // 查询通知 (分页 + 类型过滤)
@@ -631,7 +655,7 @@ client.MarkAllNotificationsRead(ctx)               // 全部
 client.DeleteNotification(ctx, "notif-id-xxx")
 ```
 
-### 4.11 设备注册 (推送通知)
+### 4.12 设备注册 (推送通知)
 
 ```go
 // 注册推送 Token (FCM/APNs/鸿蒙推送)
@@ -645,7 +669,7 @@ client.RegisterDevice(ctx, acosmi.DeviceRegistration{
 client.UnregisterDevice(ctx, "fcm-token-xxx")
 ```
 
-### 4.12 通知偏好
+### 4.13 通知偏好
 
 ```go
 // 查询用户偏好
@@ -1040,6 +1064,21 @@ type DeviceRegistration struct {
 func ParseNotificationEvent(ev WSEvent) *Notification // 返回 nil 表示非通知
 ```
 
+### Subscription
+
+```go
+type SubscriptionType string // "free" | "pro" | "max" | "team" | "enterprise"
+const (
+    SubscriptionFree, SubscriptionPro, SubscriptionMax SubscriptionType
+    SubscriptionTeam, SubscriptionEnterprise           SubscriptionType
+)
+
+type SubscriptionInfo struct {
+    SubscriptionType       SubscriptionType `json:"subscriptionType"`
+    ActiveEntitlementTypes []string         `json:"activeEntitlementTypes"`
+}
+```
+
 ### Profile
 
 ```go
@@ -1335,6 +1374,7 @@ require github.com/acosmi/acosmi-sdk-go v0.7.0
 
 | Tag | 日期 | 说明 |
 |-----|------|------|
+| `v0.8.0` | 2026-04-16 | 订阅层级推导 (权益→free/pro) + claude_* 前缀兼容 |
 | `v0.7.0` | 2026-04-16 | Profile 能力: 会话/资料/密码/OAuth 身份管理 |
 | `v0.6.0` | 2026-04-16 | 通知系统 + 设备注册 + 三端原生聊天 |
 
@@ -1359,6 +1399,19 @@ require github.com/acosmi/acosmi-sdk-go v0.7.0
 ---
 
 ## 12. 版本记录
+
+### v0.8.0 (2026-04-16) — 订阅层级推导
+
+- **feat(subscription)**: 新增 2 个订阅层级查询方法
+  - `GetSubscriptionType` — 返回干净枚举值 (free/pro/max/team/enterprise)
+  - `GetSubscriptionInfo` — 完整信息 (层级 + 活跃权益类型列表)
+- **feat(types)**: 新增 `SubscriptionType` 枚举 + `SubscriptionInfo` 结构体
+  - 5 个层级常量: `SubscriptionFree` / `SubscriptionPro` / `SubscriptionMax` / `SubscriptionTeam` / `SubscriptionEnterprise`
+- **feat(compat)**: SDK 内部 `normalizeSubscriptionType` 自动去除 `claude_*` 前缀
+  - `"claude_max"` → `SubscriptionMax`，`"claude_pro"` → `SubscriptionPro`
+  - 下游可删除全部 `claude_*` 硬编码解析，统一走 SDK
+- 后端新增 `GET /api/v4/entitlements/subscription` 端点 (从活跃权益推导层级)
+- 推导规则: 有 `TOKEN_PACKAGE` → `pro`，否则 → `free` (team/max/enterprise 预留)
 
 ### v0.7.0 (2026-04-16) — Profile 与账号管理
 

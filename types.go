@@ -911,6 +911,37 @@ type OAuthIdentity struct {
 // StringPtr 辅助函数: 返回字符串指针 (用于 UpdateProfileRequest)
 func StringPtr(s string) *string { return &s }
 
+// ---------- Subscription ----------
+
+// SubscriptionType 订阅层级 (从活跃权益推导)
+type SubscriptionType string
+
+const (
+	SubscriptionFree       SubscriptionType = "free"
+	SubscriptionPro        SubscriptionType = "pro"
+	SubscriptionMax        SubscriptionType = "max"        // 预留
+	SubscriptionTeam       SubscriptionType = "team"       // 预留
+	SubscriptionEnterprise SubscriptionType = "enterprise" // 预留
+)
+
+// SubscriptionInfo GET /entitlements/subscription 响应
+type SubscriptionInfo struct {
+	SubscriptionType       SubscriptionType `json:"subscriptionType"`
+	ActiveEntitlementTypes []string         `json:"activeEntitlementTypes"`
+}
+
+// normalizeSubscriptionType 标准化订阅类型 (兼容 claude_* 前缀历史值)
+func normalizeSubscriptionType(raw string) SubscriptionType {
+	// 去除 claude_ 前缀 (兼容旧格式: "claude_max" → "max")
+	clean := strings.TrimPrefix(raw, "claude_")
+	switch SubscriptionType(clean) {
+	case SubscriptionFree, SubscriptionPro, SubscriptionMax, SubscriptionTeam, SubscriptionEnterprise:
+		return SubscriptionType(clean)
+	default:
+		return SubscriptionFree
+	}
+}
+
 // ---------- Notifications ----------
 
 // Notification 单条通知
