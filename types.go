@@ -79,10 +79,11 @@ type ModelCapabilities struct {
 	SupportsStructuredOutput bool `json:"supports_structured_output"`
 
 	// 推理控制
-	SupportsEffort    bool `json:"supports_effort"`
-	SupportsMaxEffort bool `json:"supports_max_effort"` // Opus 4.6 独有
-	SupportsFastMode  bool `json:"supports_fast_mode"`  // Opus 4.6 独有
-	SupportsAutoMode  bool `json:"supports_auto_mode"`  // Auto 模式 (模型自主选择工具/搜索策略)
+	SupportsEffort       bool `json:"supports_effort"`
+	SupportsMaxEffort    bool `json:"supports_max_effort"`    // Opus 4.6 独有
+	SupportsFastMode     bool `json:"supports_fast_mode"`     // Opus 4.6 独有
+	SupportsAutoMode     bool `json:"supports_auto_mode"`     // Auto 模式 (模型自主选择工具/搜索策略)
+	SupportsDeepThinking bool `json:"supports_deep_thinking"` // 支持 max 深度思考 (Opus 4.6)
 
 	// 上下文与缓存
 	Supports1MContext    bool `json:"supports_1m_context"`
@@ -159,11 +160,45 @@ type ChatRequest struct {
 
 // ---------- Chat 扩展类型 ----------
 
+// ThinkingLevel 三档思考级别 (v0.9.0)
+// 下游只需传 Level，SDK 自动组装 thinking + effort + maxTokens
+const (
+	ThinkingOff  = "off"  // 关闭: thinking=disabled, 不发 effort
+	ThinkingHigh = "high" // 标准: thinking=adaptive, effort=high, maxTokens≥32K
+	ThinkingMax  = "max"  // 深度: thinking=adaptive, effort=max, maxTokens=模型上限
+)
+
+// ThinkingHighMinMaxTokens 标准思考最低 maxTokens
+// 依据: CrabCode 默认 MAX_OUTPUT_TOKENS_DEFAULT = 32_000
+const ThinkingHighMinMaxTokens = 32_000
+
+// ThinkingMaxFallbackMaxTokens 深度思考回退 maxTokens
+// 当 caps.MaxOutputTokens 不可用时使用
+// 依据: Opus 4.6 上限 128K
+const ThinkingMaxFallbackMaxTokens = 128_000
+
 // ThinkingConfig 控制模型思考行为
 type ThinkingConfig struct {
-	Type         string `json:"type"`                    // "adaptive" | "enabled" | "disabled"
-	BudgetTokens int    `json:"budget_tokens,omitempty"` // type="enabled" 时的 token 预算
-	Display      string `json:"display,omitempty"`       // "none" | "summary" | "" (默认空=完整)
+	Type         string `json:"type"`                    // "enabled" | "disabled" | "adaptive"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // 仅 type="enabled" 时 (旧模型回退)
+
+	// Level 思考级别 (v0.9.0): "off" | "high" | "max"
+	// 设置后 SDK 在 BuildRequestBody 中自动:
+	//   1. 设置 thinking 类型 (adaptive 优先, 旧模型回退 enabled)
+	//   2. 设置 effort 参数
+	//   3. 必要时拉高 max_tokens
+	Level string `json:"level,omitempty"`
+
+	Display string `json:"display,omitempty"` // "none" | "summary" | "" (默认空=完整)
+}
+
+// NewThinkingConfig 根据三档 level 创建配置
+// off → disabled; high/max → adaptive + Level (SDK 序列化时自动组装完整参数)
+func NewThinkingConfig(level string) *ThinkingConfig {
+	if level == "" || level == ThinkingOff {
+		return &ThinkingConfig{Type: "disabled"}
+	}
+	return &ThinkingConfig{Type: "adaptive", Level: level}
 }
 
 // ServerTool 定义服务端执行的工具

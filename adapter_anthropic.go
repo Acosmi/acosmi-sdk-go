@@ -39,9 +39,20 @@ func (a *AnthropicAdapter) BuildRequestBody(caps ModelCapabilities, req *ChatReq
 	if req.Temperature != nil {
 		body["temperature"] = *req.Temperature
 	}
-	if req.Thinking != nil {
-		body["thinking"] = req.Thinking
+	// ── Thinking + Effort 组装 ──
+	if req.Thinking != nil && req.Thinking.Level != "" {
+		// Level 模式: SDK 接管 thinking + effort + maxTokens
+		resolveThinkingLevel(body, req, caps)
+	} else {
+		// 兼容模式: 调用方自己拼 (保持 v0.8.0 行为)
+		if req.Thinking != nil {
+			body["thinking"] = req.Thinking
+		}
+		if req.Effort != nil {
+			body["effort"] = req.Effort
+		}
 	}
+
 	if req.Metadata != nil {
 		body["metadata"] = req.Metadata
 	}
@@ -70,12 +81,9 @@ func (a *AnthropicAdapter) BuildRequestBody(caps ModelCapabilities, req *ChatReq
 		body["tools"] = allTools
 	}
 
-	// ── 推理控制 ──
+	// ── 推理控制 (非 Level 模式时的透传) ──
 	if req.Speed != "" {
 		body["speed"] = req.Speed
-	}
-	if req.Effort != nil {
-		body["effort"] = req.Effort
 	}
 	if req.OutputConfig != nil {
 		body["output_config"] = req.OutputConfig
@@ -88,11 +96,97 @@ func (a *AnthropicAdapter) BuildRequestBody(caps ModelCapabilities, req *ChatReq
 	}
 
 	// ── 透传 ExtraBody ──
+	// 注意: ExtraBody 在 resolveThinkingLevel 之后执行，
+	// Level 模式下 thinking / effort / max_tokens / temperature 已由 SDK 管理，
+	// ExtraBody 中不应包含这些 key，否则会覆盖 SDK 计算结果
 	for k, v := range req.ExtraBody {
 		body[k] = v
 	}
 
 	return body, nil
+}
+
+// resolveThinkingLevel 根据 ThinkingConfig.Level 自动组装请求参数
+//
+// off  → thinking=disabled, 不设 effort, 不动 maxTokens
+// high → thinking=adaptive, effort=high, maxTokens 至少 32K
+// max  → thinking=adaptive, effort=max, maxTokens 拉到模型上限
+//
+// 旧模型不支持 adaptive 时，回退到 enabled + budget_tokens = maxTokens - 1
+// (旧模型上 effort 也不可用，仅靠 budget 控制深度)
+func resolveThinkingLevel(body map[string]any, req *ChatRequest, caps ModelCapabilities) {
+	level := req.Thinking.Level
+
+	// ── off ──
+	if level == ThinkingOff {
+		body["thinking"] = map[string]any{"type": "disabled"}
+		return
+	}
+
+	// ── 模型不支持任何形式的 thinking → 不动 maxTokens，直接返回 ──
+	if !caps.SupportsAdaptiveThinking && !caps.SupportsThinking {
+		return
+	}
+
+	// ── 确定 maxTokens ──
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = ThinkingHighMinMaxTokens
+	}
+
+	if level == ThinkingMax {
+		// 深度: 拉到模型上限
+		modelMax := caps.MaxOutputTokens
+		if modelMax <= 0 {
+			modelMax = ThinkingMaxFallbackMaxTokens
+		}
+		if maxTokens < modelMax {
+			maxTokens = modelMax
+		}
+	} else {
+		// high: 至少 32K
+		if maxTokens < ThinkingHighMinMaxTokens {
+			maxTokens = ThinkingHighMinMaxTokens
+		}
+	}
+	body["max_tokens"] = maxTokens
+
+	// ── thinking ──
+	// adaptive 优先 (Claude 4.x); 旧模型回退 enabled + full budget
+	if caps.SupportsAdaptiveThinking {
+		thinking := map[string]any{"type": "adaptive"}
+		if req.Thinking.Display != "" {
+			thinking["display"] = req.Thinking.Display
+		}
+		body["thinking"] = thinking
+	} else if caps.SupportsThinking {
+		// 旧模型: enabled + budget = maxTokens - 1 (给满)
+		budget := maxTokens - 1
+		if budget < 1024 {
+			budget = 1024
+		}
+		thinking := map[string]any{
+			"type":          "enabled",
+			"budget_tokens": budget,
+		}
+		if req.Thinking.Display != "" {
+			thinking["display"] = req.Thinking.Display
+		}
+		body["thinking"] = thinking
+	}
+
+	// ── effort ──
+	// 仅支持 effort 的模型发送此参数
+	if caps.SupportsEffort {
+		effortLevel := "high"
+		if level == ThinkingMax && caps.SupportsMaxEffort {
+			effortLevel = "max"
+		}
+		body["effort"] = map[string]any{"level": effortLevel}
+	}
+
+	// ── API 约束: thinking 与 temperature 互斥 ──
+	delete(body, "temperature")
 }
 
 // ParseResponse 解析 Anthropic 格式同步响应

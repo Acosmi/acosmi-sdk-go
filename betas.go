@@ -49,7 +49,11 @@ func buildBetas(caps ModelCapabilities, req *ChatRequest) []string {
 	}
 
 	// ── 推理控制 ──
-	if caps.SupportsEffort && req.Effort != nil {
+	// Level 模式下 resolveThinkingLevel 直接写 body["effort"]，req.Effort 仍为 nil，
+	// 所以需额外判断 Level 是否激活了 effort
+	needsEffort := req.Effort != nil ||
+		(req.Thinking != nil && req.Thinking.Level != "" && req.Thinking.Level != ThinkingOff)
+	if caps.SupportsEffort && needsEffort {
 		betas = append(betas, betaEffort)
 	}
 	if caps.SupportsFastMode && req.Speed == "fast" {
