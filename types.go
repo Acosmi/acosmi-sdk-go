@@ -857,6 +857,60 @@ type YudaoPageResult[T any] struct {
 	Total int64 `json:"total"`
 }
 
+// ---------- Profile (scope: account) ----------
+
+// UserProfile 用户个人资料 (对齐后端 model.UserResponse)
+type UserProfile struct {
+	ID              string `json:"id"`
+	Email           string `json:"email"`
+	Name            string `json:"name"`
+	Avatar          string `json:"avatar,omitempty"`
+	Role            string `json:"role"`              // owner | admin | developer | member | viewer
+	Phone           string `json:"phone,omitempty"`   // 脱敏: 138****8000
+	PhoneVerified   bool   `json:"phoneVerified"`
+	PrimaryIdentity string `json:"primaryIdentity"`   // email | phone | oauth
+	CreatedAt       string `json:"createdAt"`
+}
+
+// SessionInfo GET /auth/session 响应
+type SessionInfo struct {
+	User UserProfile `json:"user"`
+	Role string      `json:"role"`
+}
+
+// UpdateProfileRequest PUT /auth/profile 请求
+type UpdateProfileRequest struct {
+	Name   *string `json:"name,omitempty"`
+	Avatar *string `json:"avatar,omitempty"`
+}
+
+// ChangePasswordRequest PUT /auth/password 请求
+type ChangePasswordRequest struct {
+	OldPassword string `json:"oldPassword"`
+	NewPassword string `json:"newPassword"` // 至少 12 位
+}
+
+// ChangePasswordResult PUT /auth/password 响应
+type ChangePasswordResult struct {
+	Message string      `json:"message"`
+	Token   string      `json:"token"`
+	User    UserProfile `json:"user"`
+}
+
+// OAuthIdentity 已绑定的第三方身份
+type OAuthIdentity struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`              // github | google | wechat
+	ProviderUID string `json:"providerUID"`
+	DisplayName string `json:"displayName"`
+	Email       string `json:"email,omitempty"`
+	AvatarURL   string `json:"avatarUrl,omitempty"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+// StringPtr 辅助函数: 返回字符串指针 (用于 UpdateProfileRequest)
+func StringPtr(s string) *string { return &s }
+
 // ---------- Notifications ----------
 
 // Notification 单条通知

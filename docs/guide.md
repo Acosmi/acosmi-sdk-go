@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.6.0 | Go 1.22+ | MIT
+> v0.7.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -14,8 +14,9 @@
   - [4.4 权益管理](#44-权益管理)
   - [4.5 流量包商城](#45-流量包商城)
   - [4.6 钱包](#46-钱包)
-  - [4.7 技能商店](#47-技能商店)
-  - [4.8 WebSocket 实时推送](#48-websocket-实时推送)
+  - [4.7 个人资料与账号管理](#47-个人资料与账号管理)
+  - [4.8 技能商店](#48-技能商店)
+  - [4.9 WebSocket 实时推送](#49-websocket-实时推送)
 - [5. CLI 命令手册](#5-cli-命令手册)
 - [6. 数据类型参考](#6-数据类型参考)
 - [7. 完整示例](#7-完整示例)
@@ -482,7 +483,57 @@ txns, _ := client.GetWalletTransactions(ctx)      // 交易记录
 
 > 金额使用 `json.Number` 防精度丢失。
 
-### 4.7 技能商店
+### 4.7 个人资料与账号管理
+
+> scope: `account`
+
+#### 会话信息
+
+```go
+session, _ := client.GetSession(ctx)
+fmt.Printf("用户: %s (%s) 角色: %s\n", session.User.Name, session.User.Email, session.Role)
+```
+
+#### 修改资料
+
+```go
+// 仅修改昵称
+profile, _ := client.UpdateProfile(ctx, acosmi.UpdateProfileRequest{
+    Name: acosmi.StringPtr("新昵称"),
+})
+
+// 仅修改头像
+profile, _ = client.UpdateProfile(ctx, acosmi.UpdateProfileRequest{
+    Avatar: acosmi.StringPtr("https://example.com/avatar.jpg"),
+})
+```
+
+> 使用 `StringPtr` 辅助函数构造指针字段。`nil` 表示不修改该字段。
+
+#### 修改密码
+
+```go
+result, _ := client.ChangePassword(ctx, acosmi.ChangePasswordRequest{
+    OldPassword: "current-password",
+    NewPassword: "new-secure-password-12", // 至少 12 位
+})
+// result.Token 为新签发的 JWT (服务端已吊销全部旧会话)
+```
+
+#### OAuth 身份管理
+
+```go
+// 列出已绑定的第三方账号
+identities, _ := client.ListIdentities(ctx)
+for _, id := range identities {
+    fmt.Printf("[%s] %s (%s)\n", id.Provider, id.DisplayName, id.Email)
+}
+
+// 解绑 (至少保留一种登录方式)
+client.UnlinkIdentity(ctx, "identity-id")
+```
+
+### 4.8 技能商店
 
 ```go
 // 公开 (无需登录)
@@ -516,7 +567,7 @@ tools, _ := client.ListTools(ctx)   // 技能 + 插件合并视图
 tool, _ := client.GetTool(ctx, "tool-id")
 ```
 
-### 4.8 WebSocket 实时推送
+### 4.9 WebSocket 实时推送
 
 ```go
 client.Connect(ctx, acosmi.WSConfig{
@@ -561,7 +612,7 @@ if n := acosmi.ParseNotificationEvent(ev); n != nil {
 }
 ```
 
-### 4.9 通知管理
+### 4.10 通知管理
 
 ```go
 // 查询通知 (分页 + 类型过滤)
@@ -580,7 +631,7 @@ client.MarkAllNotificationsRead(ctx)               // 全部
 client.DeleteNotification(ctx, "notif-id-xxx")
 ```
 
-### 4.10 设备注册 (推送通知)
+### 4.11 设备注册 (推送通知)
 
 ```go
 // 注册推送 Token (FCM/APNs/鸿蒙推送)
@@ -594,7 +645,7 @@ client.RegisterDevice(ctx, acosmi.DeviceRegistration{
 client.UnregisterDevice(ctx, "fcm-token-xxx")
 ```
 
-### 4.11 通知偏好
+### 4.12 通知偏好
 
 ```go
 // 查询用户偏好
@@ -989,6 +1040,34 @@ type DeviceRegistration struct {
 func ParseNotificationEvent(ev WSEvent) *Notification // 返回 nil 表示非通知
 ```
 
+### Profile
+
+```go
+type UserProfile struct {
+    ID, Email, Name, Avatar, Role, Phone string
+    PhoneVerified bool; PrimaryIdentity, CreatedAt string
+}
+
+type SessionInfo struct {
+    User UserProfile `json:"user"`
+    Role string      `json:"role"`
+}
+
+type UpdateProfileRequest struct {
+    Name   *string `json:"name,omitempty"`   // nil=不修改
+    Avatar *string `json:"avatar,omitempty"` // nil=不修改
+}
+func StringPtr(s string) *string // 辅助: 构造 *string
+
+type ChangePasswordRequest struct { OldPassword, NewPassword string }
+type ChangePasswordResult struct { Message, Token string; User UserProfile }
+
+type OAuthIdentity struct {
+    ID, Provider, ProviderUID, DisplayName string
+    Email, AvatarURL string; CreatedAt string
+}
+```
+
 ### 错误
 
 ```go
@@ -1256,6 +1335,7 @@ require github.com/acosmi/acosmi-sdk-go v0.7.0
 
 | Tag | 日期 | 说明 |
 |-----|------|------|
+| `v0.7.0` | 2026-04-16 | Profile 能力: 会话/资料/密码/OAuth 身份管理 |
 | `v0.6.0` | 2026-04-16 | 通知系统 + 设备注册 + 三端原生聊天 |
 
 > 后续每次发版在此追加记录，并同步更新§12 版本记录。
@@ -1279,6 +1359,20 @@ require github.com/acosmi/acosmi-sdk-go v0.7.0
 ---
 
 ## 12. 版本记录
+
+### v0.7.0 (2026-04-16) — Profile 与账号管理
+
+- **feat(profile)**: 新增 5 个个人资料/账号管理方法
+  - `GetSession` — 获取当前会话信息 (用户资料 + 角色)
+  - `UpdateProfile` — 修改昵称/头像 (指针字段, nil 不修改)
+  - `ChangePassword` — 修改密码 (旧密码验证, 新密码 ≥12 位, 服务端吊销全部旧会话)
+  - `ListIdentities` — 列出已绑定 OAuth 身份 (GitHub/Google/WeChat)
+  - `UnlinkIdentity` — 解绑 OAuth 身份 (至少保留一种登录方式)
+- **feat(types)**: 新增 7 个类型
+  - `UserProfile` / `SessionInfo` / `UpdateProfileRequest`
+  - `ChangePasswordRequest` / `ChangePasswordResult`
+  - `OAuthIdentity` / `StringPtr` 辅助函数
+- 所有新方法遵循 `doJSON` + `APIResponse[T]` 既有模式，完全向后兼容
 
 ### v0.6.0 (2026-04-13) — 通知系统 + 设备注册
 

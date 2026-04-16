@@ -1061,6 +1061,54 @@ func (c *Client) GetWalletTransactions(ctx context.Context) ([]Transaction, erro
 }
 
 // ============================================================================
+// API: Profile (scope: account)
+// ============================================================================
+
+// GetSession 获取当前会话信息 (用户资料 + 角色)
+func (c *Client) GetSession(ctx context.Context) (*SessionInfo, error) {
+	var resp APIResponse[SessionInfo]
+	if err := c.doJSON(ctx, http.MethodGet, "/auth/session", nil, &resp, false); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// UpdateProfile 修改个人资料 (昵称/头像)
+// 使用 StringPtr 辅助函数构造请求: UpdateProfile(ctx, UpdateProfileRequest{Name: StringPtr("新昵称")})
+func (c *Client) UpdateProfile(ctx context.Context, req UpdateProfileRequest) (*UserProfile, error) {
+	var resp APIResponse[UserProfile]
+	if err := c.doJSON(ctx, http.MethodPut, "/auth/profile", req, &resp, false); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// ChangePassword 修改密码 (需提供旧密码, 新密码至少 12 位)
+// 密码变更后服务端吊销全部会话, 返回新 token
+func (c *Client) ChangePassword(ctx context.Context, req ChangePasswordRequest) (*ChangePasswordResult, error) {
+	var resp APIResponse[ChangePasswordResult]
+	if err := c.doJSON(ctx, http.MethodPut, "/auth/password", req, &resp, false); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// ListIdentities 获取已绑定的 OAuth 身份列表 (GitHub/Google/WeChat)
+func (c *Client) ListIdentities(ctx context.Context) ([]OAuthIdentity, error) {
+	var resp APIResponse[[]OAuthIdentity]
+	if err := c.doJSON(ctx, http.MethodGet, "/auth/identities", nil, &resp, false); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+// UnlinkIdentity 解绑 OAuth 身份 (至少保留一种登录方式)
+func (c *Client) UnlinkIdentity(ctx context.Context, identityID string) error {
+	var resp APIResponse[any]
+	return c.doJSON(ctx, http.MethodDelete, "/auth/identities/"+url.PathEscape(identityID), nil, &resp, false)
+}
+
+// ============================================================================
 // API: Skill Store (scope: skill_store / 公共端点)
 // ============================================================================
 

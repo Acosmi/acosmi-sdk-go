@@ -466,7 +466,11 @@ func openBrowser(url string) error {
 	case "linux":
 		cmd = exec.Command("xdg-open", url)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		// 优先 rundll32（适用于简单 URL），失败则降级 PowerShell Start-Process（处理 OAuth 长 URL）
+		if err := exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start(); err == nil {
+			return nil
+		}
+		cmd = exec.Command("powershell", "-NoProfile", "-Command", "Start-Process '"+url+"'")
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
