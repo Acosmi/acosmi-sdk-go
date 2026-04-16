@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.5.0 | Go 1.22+ | MIT
+> v0.6.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -1212,7 +1212,55 @@ make install    # → $GOPATH/bin
 | Linux | arm64 / amd64 |
 | Windows | amd64 |
 
-版本注入: `git tag v0.x.0 && make build`。NPM 发布: `cd npm && npm publish --access public`。
+### Go Module 版本发布 (Git Tag)
+
+Go Modules 通过 Git Tag 解析版本。**每次 SDK 发版必须打 tag**，否则下游 `go get` / `go mod tidy` 无法拉取，只能用 `replace` 本地路径引用（CI 和其他开发者无法构建）。
+
+**发版流程:**
+
+```bash
+# 1. 确认代码已合并到 main
+git checkout main && git pull
+
+# 2. 打 tag (遵循 Go semver: vMAJOR.MINOR.PATCH)
+git tag v0.7.0
+
+# 3. 推送 tag 到 GitHub
+git push origin v0.7.0
+```
+
+**下游引用:**
+
+```bash
+# go.mod 中直接 require 即可，无需 replace
+go get github.com/acosmi/acosmi-sdk-go@v0.7.0
+```
+
+```go
+// go.mod
+require github.com/acosmi/acosmi-sdk-go v0.7.0
+// 不需要 replace 行
+```
+
+**版本规范** (参考 https://go.dev/ref/mod#versions):
+
+| 场景 | Tag 格式 | 示例 |
+|------|----------|------|
+| 正式发布 | `vX.Y.Z` | `v0.7.0` |
+| 预发布 | `vX.Y.Z-rc.N` | `v0.7.0-rc.1` |
+| 破坏性变更 (v2+) | `vX.Y.Z` + module path 加 `/vX` | `v2.0.0` |
+
+> 当前为 v0.x.x，API 可自由调整。升至 v1.0.0 后即为稳定承诺，破坏性变更需升 major。
+
+**已发布 Tag 历史:**
+
+| Tag | 日期 | 说明 |
+|-----|------|------|
+| `v0.6.0` | 2026-04-16 | 通知系统 + 设备注册 + 三端原生聊天 |
+
+> 后续每次发版在此追加记录，并同步更新§12 版本记录。
+
+**NPM CLI 发布:** `cd npm && npm publish --access public`。
 
 ---
 
