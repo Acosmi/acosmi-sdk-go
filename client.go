@@ -42,9 +42,9 @@ type Client struct {
 
 // Config 客户端配置
 type Config struct {
-	// ServerURL nexus-v4 API 根地址 (默认 https://acosmi.ai)。
+	// ServerURL nexus-v4 API 根地址 (默认 https://acosmi.com)。
 	// SDK 自动追加 /api/v4, 无需手动拼接。
-	// 本地开发覆盖: http://127.0.0.1:3300
+	// 国际站显式传 https://acosmi.ai, 本地开发传 http://127.0.0.1:3300。
 	ServerURL string
 
 	// Store token 持久化实现，nil 则使用默认文件存储 (~/.acosmi/tokens.json)
@@ -57,7 +57,7 @@ type Config struct {
 // NewClient 创建客户端 (自动加载已保存的 token)
 func NewClient(cfg Config) (*Client, error) {
 	if cfg.ServerURL == "" {
-		cfg.ServerURL = "https://acosmi.ai"
+		cfg.ServerURL = "https://acosmi.com"
 	}
 
 	store := cfg.Store

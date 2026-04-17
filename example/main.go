@@ -13,11 +13,11 @@ import (
 
 func main() {
 	// nexus-v4 服务地址 (SDK 自动追加 /api/v4, 无需手动拼接)
-	// 生产环境默认 https://acosmi.ai; 本地开发设置环境变量覆盖:
-	//   export ACOSMI_SERVER_URL=http://127.0.0.1:3300
+	// 生产环境默认 https://acosmi.com (大陆); 国际站 https://acosmi.ai
+	// 本地开发: export ACOSMI_SERVER_URL=http://127.0.0.1:3300
 	serverURL := os.Getenv("ACOSMI_SERVER_URL")
 	if serverURL == "" {
-		serverURL = "https://acosmi.ai"
+		serverURL = "https://acosmi.com"
 	}
 
 	// 1. 创建客户端 (合并后统一入口, 一次授权覆盖全域 API)

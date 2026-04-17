@@ -48,8 +48,8 @@ func TestNewClient_DefaultServerURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.serverURL != "https://acosmi.ai" {
-		t.Errorf("expected default 'https://acosmi.ai', got %q", c.serverURL)
+	if c.serverURL != "https://acosmi.com" {
+		t.Errorf("expected default 'https://acosmi.com', got %q", c.serverURL)
 	}
 }
 
