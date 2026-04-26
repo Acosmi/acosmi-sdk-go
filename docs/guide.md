@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.13.2 | Go 1.22+ | MIT
+> v0.14.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -532,6 +532,38 @@ if caps.SupportsDeepThinking {
 }
 ```
 
+#### 同 model_id 多 wireFormat 共存 (Gateway 2026-04-26+)
+
+DashScope / Zhipu / DeepSeek 等同时支持 Anthropic / OpenAI 兼容端点的 provider, 支持
+**同一个 `modelId` 挂两份不同 `compat_profile` 的托管模型记录**:
+
+```
+qwen3.6-plus  +  aliyun_dashscope_anthropic_v1   →  /anthropic 端点
+qwen3.6-plus  +  dashscope_openai_compat_v1      →  /chat 端点
+```
+
+DB 唯一键升级: `(tenant_id, model_id, compat_profile)` partial unique。
+`ListModels()` 缓存里同 `ModelID` 出现两条记录, 各自 `PreferredFormat` 不同:
+
+```go
+models, _ := client.ListModels(ctx)
+for _, m := range models {
+    fmt.Printf("%s [profile=%s] preferred=%s supported=%v\n",
+        m.ModelID, m.Provider, m.PreferredFormat, m.SupportedFormats)
+}
+// 可能输出:
+//   qwen3.6-plus [profile=dashscope] preferred=anthropic supported=[anthropic openai]
+//   qwen3.6-plus [profile=dashscope] preferred=openai    supported=[openai]
+```
+
+**SDK 路由语义**: SDK 端按 `getCachedModel(modelID)` 命中**首条**记录用于 `PreferredFormat`
+判定; **endpoint 路径已隐含 wireFormat** (`/anthropic` vs `/chat`), 后端按
+endpoint 类型选**正确的那条** ManagedModel —— SDK 调用方无需感知双记录, 透明工作。
+
+> 业务场景: 一个 model_id 想同时服务 Anthropic / OpenAI 两类客户 (例如
+> Claude 客户端走 Anthropic, ChatGPT 客户端走 OpenAI), 配两份各自独立的 API key /
+> endpoint / capabilities。
+
 ### 4.4 权益管理
 
 > scope: `ai`
@@ -558,6 +590,40 @@ records, _ := client.ListConsumeRecords(ctx, 1, 20)
 // 领取当月免费额度 (幂等: 已领取返回已有权益, 不重复发放)
 ent, _ := client.ClaimMonthlyFree(ctx)
 ```
+
+#### 模型白名单自动同步 (Gateway 2026-04-26+)
+
+历史问题: tk-dist `entitlements.allowed_models` 字段是套餐购买时写入的字符串数组快照,
+管理员在 Gateway 加新 ManagedModel 时**不会自动更新存量用户白名单** → 用户调用新模型
+返回 403 "权益包不包含此模型"。
+
+**Gateway 侧已加入三层闭环**:
+
+1. **启动追平**: nexus-backend 启动时跑一次 `SyncAllManagedModelWhitelist`, 把所有
+   `is_enabled=true` 的 `managed_models.model_id` 合并进所有 ACTIVE TOKEN_PACKAGE
+   `entitlements.allowed_models`。
+2. **Create/Update 增量同步**: 管理员后台新建或启用一个 ManagedModel, 后端 hook
+   异步同步该 model_id 到所有付费 entitlement 白名单。
+3. **Hold 失败兜底**: 如果用户首次调用碰上 `IsModelNotAllowed` 且该 model_id 是
+   `ACTIVE` 状态, 后端**自动同步白名单 + 重试一次 Hold**。SDK 调用方**感知不到**这次内部重试。
+
+**SDK 端无需任何改动**, 只需对 403 响应做正常兜底处理:
+
+```go
+resp, err := client.Chat(ctx, modelID, req)
+if err != nil {
+    var apiErr *acosmi.APIError
+    if errors.As(err, &apiErr) && apiErr.StatusCode == 403 {
+        // 极端情况下兜底失败 (跨库连接故障 / 模型已禁用), 文案会提示
+        // "已尝试自动同步白名单仍失败, 请联系管理员"
+        log.Printf("model not in plan: %s", apiErr.Message)
+    }
+}
+```
+
+> **关于 `MONTHLY_QUOTA` / `REGISTRATION_BONUS` / `INVITE_REWARD` 类型**:
+> 这些 entitlement 的 `allowed_models` 设计上为空 (按 type 维度授权, 不限模型),
+> 同步只覆盖 `TOKEN_PACKAGE` 类型 (套餐购买快照需追平)。
 
 ### 4.5 流量包商城
 
@@ -1435,6 +1501,26 @@ make install    # → $GOPATH/bin
 ## 12. 版本记录
 
 > 本节只保留 SDK 使用者最需要关心的兼容点与破坏性变更。更细的网关实现背景、审计过程和分阶段交付记录，建议查主仓架构文档。
+
+### v0.14.0 (2026-04-26)
+
+- **冷缓存根治**: `Chat` / `ChatMessages` / `ChatStream` / `ChatMessagesStream` 在
+  模型缓存未命中时**自动触发一次 `ListModels()` 刷新**, 仍未找到返回
+  `*ModelNotFoundError`; 不再静默回退到 Anthropic 路由 (修复 F2 根因)
+  - 调用方可 `errors.As(err, &mnf)` 捕获处理。
+- **Adapter 路由注释澄清**: `adapter.go` 注释明确声明优先级链
+  `PreferredFormat → SupportedFormats → provider 名硬编码 fallback`,
+  与 `getAdapterForModel` 实际行为对齐。
+- **网关侧能力对齐 (docs)**:
+  - § 4.3 § 同 model_id 多 wireFormat 共存 — DashScope/Zhipu/DeepSeek 现可挂同
+    model_id 的 anthropic + openai 双 ManagedModel 记录, DB 唯一键升级到
+    `(tenant_id, model_id, compat_profile)`; SDK 调用透明无需感知, 后端按 endpoint
+    路径自动选对应记录。
+  - § 4.4 § 模型白名单自动同步 — 三层闭环 (启动追平 + Create/Update 增量 + Hold
+    失败兜底); SDK 端 403 兜底处理建议; 类型语义 (仅 TOKEN_PACKAGE 同步,
+    其他 type allowed_models 设计上为空 = 不限模型)。
+  - 错误文案诚实化: 老版"权益包不包含此模型,请购买"误导付费用户去重新购买,
+    新版告知"已尝试自动同步,联系管理员"。
 
 ### v0.13.2 / v0.13.1 (2026-04-22)
 
