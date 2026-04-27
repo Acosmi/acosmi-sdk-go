@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.15.1 | Go 1.22+ | MIT
+> v0.15.2 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -1728,6 +1728,39 @@ make install    # → $GOPATH/bin
 ## 12. 版本记录
 
 > 本节只保留 SDK 使用者最需要关心的兼容点与破坏性变更。更细的网关实现背景、审计过程和分阶段交付记录，建议查主仓架构文档。
+
+### v0.15.2 (2026-04-28) — `StripEphemeral` thinking 硬豁免 (历史污染兜底)
+
+> **Bug fix (0 破坏性)**: `sanitize.StripEphemeral` 内置 thinking / redacted_thinking 硬豁免, 即使携带 `acosmi_ephemeral=true` 也不剥。修复 extended thinking + tool_use 续轮场景下 SDK 误剥 thinking 块导致的上游 400。
+
+**根因**: v0.13 ~ v0.15.1 期间, 网关 `anthropic_official` preset 把 `BlockThinking` / `BlockRedactedThinking` 列入 `EphemeralResponseBlocks`, 给响应注入 `acosmi_ephemeral=true`。客户端 SDK `StripEphemeral` 在下一轮请求前据此剥除 → 上游报:
+
+```
+invalid_request_error: The `content[].thinking` in the thinking mode
+must be passed back to the API.
+```
+
+实际契约: Anthropic extended thinking + tool_use 续轮**强制要求** assistant 历史中保留原始 thinking 块。纯文本续轮也接受 thinking 回传。
+
+**修复**:
+
+- 网关侧 (commit 55fe8090, 已部署): 移除 thinking / redacted_thinking 的 ephemeral 注入。
+- SDK 侧 (本版): `StripEphemeral` 在剥除前先按 `block.type` 短路, thinking / redacted_thinking 永不剥。即使老网关或第三方工具链注入了 `acosmi_ephemeral=true` 标记, SDK 也兜底保留, 杜绝历史污染会话再次触发 400。
+
+**对调用方可见面**:
+
+- 公共 API 签名 0 改动 (`StripEphemeral` / `SetAutoStripEphemeralHistory` 行为对其他 block 类型不变)
+- 持续会话历史会多带 thinking 块 (调用方需自行衡量是否手动裁剪节省 token; Anthropic 不计费输入 thinking token)
+- `server_tool_use` / `mcp_tool_use` / 自定义 ephemeral 业务块的剥除行为不变
+
+**测试**: 新增 3 个回归用例 (`sanitize/history_test.go`):
+- `TestStripEphemeral_NeverStripsThinking` — thinking 带标记仍保留, 同轮 ephemeral text 仍剥
+- `TestStripEphemeral_NeverStripsRedactedThinking` — 同上, redacted_thinking
+- `TestStripEphemeral_ThinkingDoesNotCascade` — thinking 不进 droppedToolUseIDs 收集, 不联动剥 user 轮 tool_result
+
+`sanitize_bridge_test.go:TestApplyRequestSanitizers_AutoStripEphemeral` 期望同步反转。`go test -race -count=1 ./...` 全绿; `FuzzSanitize` 1M execs / 15s -race 无 panic。
+
+**npm**: `@acosmi/crabclaw-skill` 同步 0.15.2。
 
 ### v0.15.1 (2026-04-27) — `ensureToken` 三态等待 (启动期并发修复)
 
