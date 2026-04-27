@@ -898,11 +898,21 @@ func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req Ch
 			if ev.Event == "started" {
 				continue
 			}
-			// 失败事件: 解析错误信息发送到 errCh
-			if ev.Event == "failed" {
-				errMsg := parseStreamError(ev.Data)
+			// 失败/错误事件: 解析错误信息发送到 errCh
+			//
+			// v0.14.1 (V2 P0.7): "event: error" 是 Anthropic 协议 (/anthropic 端点) 流式失败语义,
+			// "event: failed" 是 acosmi managed-model 协议 (OpenAI wrapper) 失败语义。两个 event
+			// 名都路由到 errCh, parseStreamError 同时兼容 Anthropic 标准 {error.type, error.message}
+			// 与 acosmi 私有扩展 {errorCode, retryable, message, stage}, 缺字段自动零值。
+			//
+			// 历史版本 (≤v0.14.0) 仅识别 failed, 拿不到 Anthropic 协议结构化错误 → /managed-models/<id>/anthropic
+			// 路径上的 transport 错误 (EOF/超时/disconnect) 经网关转化后仍当成 content 透传, 客户端
+			// 无法 errors.As(*StreamError) 决策重试。本分支补齐这个口子, 无破坏性 (老网关响应仅出现
+			// "failed" event, 此分支不影响; 新网关同时下发 "error" + 私有扩展, 此分支正确路由)。
+			if ev.Event == "failed" || ev.Event == "error" {
+				se := parseStreamError(ev.Data)
 				select {
-				case errCh <- fmt.Errorf("stream failed: %s", errMsg):
+				case errCh <- se:
 				case <-ctx.Done():
 				}
 				return
@@ -925,19 +935,107 @@ func (c *Client) ChatStreamWithUsage(ctx context.Context, modelID string, req Ch
 	return contentCh, sourcesCh, settleCh, errCh
 }
 
-// parseStreamError 从 failed 事件 JSON 中提取错误描述
-func parseStreamError(data string) string {
+// StreamError 流式失败事件的结构化表示。
+//
+// 由 gateway 的 `managed_model_stream_failed` 事件解析得到。客户端可通过
+// errors.As(err, &se) 提取并:
+//   - 按 Code 做 i18n / 重试决策 (例: Code == "empty_response" → 自动重试)
+//   - 按 Retryable 做退避决策
+//   - 按 Message 做用户可见提示 (gateway 已下发中文文案; 为空时由调用方兜底)
+//
+// 实现 error 接口, 与历史 Go error 兼容, 旧调用方 `err.Error()` 文案保持稳定。
+type StreamError struct {
+	Code      string // 例: "empty_response" / "rate_limit" / "overloaded" / ""
+	Stage     string // 例: "provider" / "settlement"
+	Message   string // 用户友好提示 (中文); 历史字段, 与 RawError 区分
+	RawError  string // gateway 原始 error 字符串 (含 provider/model/latency 等 debug 信息)
+	Retryable bool   // 客户端是否值得重试
+}
+
+// Error 实现 error 接口, 文案保持向后兼容: "stream failed: <stage>: <raw>".
+func (e *StreamError) Error() string {
+	if e == nil {
+		return ""
+	}
+	body := e.RawError
+	if body == "" {
+		body = e.Message
+	}
+	if e.Stage != "" {
+		return "stream failed: " + e.Stage + ": " + body
+	}
+	return "stream failed: " + body
+}
+
+// parseStreamError 从 failed/error 事件 JSON 中提取结构化错误。
+//
+// 兼容三种 schema (按优先级):
+//
+//  1. acosmi managed-model 协议 ("event: failed"):
+//     {errorCode, stage, error: <string>, message, retryable}
+//     example: gateway 流式失败事件 (model_gateway.go 经 handler 写入)
+//
+//  2. Anthropic 协议扩展 ("event: error", v0.14.1 起):
+//     {type:"error", error:{type, message}, errorCode, retryable, message, stage}
+//     example: handler/managed_model.go P0.7 在 Anthropic 标准之上叠加 acosmi 私有字段
+//
+//  3. Anthropic 标准纯净格式 (老网关 / 官方上游直返):
+//     {type:"error", error:{type, message}}
+//
+// 实现策略: 用 json.RawMessage 接 error 字段 — 既可能是 string 也可能是 object。
+// 解析失败时退化为 RawError=原始数据 (向后兼容 v0.14.0 行为)。
+func parseStreamError(data string) *StreamError {
 	var payload struct {
-		Error string `json:"error"`
-		Stage string `json:"stage"`
+		ErrorCode string          `json:"errorCode"`
+		Stage     string          `json:"stage"`
+		Error     json.RawMessage `json:"error"` // string OR {type, message}
+		Message   string          `json:"message"`
+		Retryable bool            `json:"retryable"`
 	}
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
-		return data // fallback: 原始数据
+		return &StreamError{RawError: data}
 	}
-	if payload.Stage != "" {
-		return payload.Stage + ": " + payload.Error
+
+	se := &StreamError{
+		Code:      payload.ErrorCode,
+		Stage:     payload.Stage,
+		Message:   payload.Message,
+		Retryable: payload.Retryable,
 	}
-	return payload.Error
+
+	// error 字段三态: string / object / 缺失
+	if len(payload.Error) > 0 {
+		// 试 string (acosmi 老协议)
+		var asString string
+		if err := json.Unmarshal(payload.Error, &asString); err == nil {
+			se.RawError = asString
+		} else {
+			// 试 object (Anthropic 标准: {type, message})
+			var asObject struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(payload.Error, &asObject); err == nil {
+				// Anthropic 协议: error.message 是用户面文案, error.type 是错误类别
+				// 把 object 序列化回 string 存 RawError, 保留全部原始信息便于排查
+				se.RawError = string(payload.Error)
+				// 私有 message 字段空时, 用 Anthropic error.message 兜底
+				if se.Message == "" && asObject.Message != "" {
+					se.Message = asObject.Message
+				}
+				// errorCode 空 + Anthropic error.type 非空时, 兜底用 type 作 Code
+				// (避免客户端 errors.As 拿到 Code="" 无法做决策)
+				if se.Code == "" && asObject.Type != "" {
+					se.Code = asObject.Type
+				}
+			} else {
+				// 既不是 string 也不是已知 object — 整段塞 RawError 兜底
+				se.RawError = string(payload.Error)
+			}
+		}
+	}
+
+	return se
 }
 
 // ============================================================================
