@@ -73,6 +73,86 @@ type ManagedModel struct {
 	// PreferredFormat 上游建议客户端优先使用的格式
 	// 取值: "anthropic" | "openai"; 空值等价于 SupportedFormats[0]
 	PreferredFormat string `json:"preferred_format,omitempty"`
+
+	// BucketInfo 当前用户在此模型上的桶余额聚合 (V0.18 V30 entitlement-listing).
+	//
+	// 仅当调用方为非 admin 用户 (web user / desktop OAuth) 时上游才会返回此字段:
+	//   - admin / X-Internal-Bypass 调用 → nil (不应用 entitlement 过滤, 直接拿 platform 全量)
+	//   - 普通用户 → 非 nil, 含 quota/used/remaining 求和 + 最高优先级桶的 class/expiresAt
+	//   - 上游 v0.17 及更早版本 / 老 nexus → nil (omitempty 向后兼容)
+	//
+	// CrabCode 等下游可凭此字段渲染"剩余 Token / 已过期" 等模型卡片元素;
+	// 不读此字段也不影响 SDK 任何路径 — 它纯粹是 UI 增强信息。
+	BucketInfo *BucketInfo `json:"bucketInfo,omitempty"`
+}
+
+// BucketInfo 用户在某 modelId 上的桶余额聚合视图 (V30 entitlement-listing).
+//
+// 多桶聚合规则 (上游 nexus-v4 计算后下发, 全部单位为 ETU - Equivalent Token Unit):
+//   - QuotaEtu / UsedEtu / RemainingEtu: 该 modelId 下用户全部 active 桶求和
+//   - SharedPoolEtu: 求和量中"来自通配桶 (model_id='*')"的部分 — 该值会被其他模型联动
+//     消耗 (用户跑别的模型也会减此余量), 与精确桶余额不同; 适合 UI 单独标注. v0.18 新增
+//   - BucketClass / ExpiresAt: 取最高优先级桶 (alive > expired > commercial > exact > expiresAt 早)
+//   - Expired: 全部桶都过期才置 true (任意桶有效则继续可用)
+//
+// 与 selectBucketForUpdate 桶选择算法**近似**对齐 — Chat 阶段最先扣的桶, 列表层用其
+// class/expiresAt 作 primary 展示. 极端场景 (typePriority 不同) 可能与实际扣费桶不同,
+// SDK 不应据此做消费决策; 实际配额校验仍靠 Chat 阶段 holdWithAutoSyncRetry.
+// V30 二轮审计 D-P2-2: 所有 *Etu 字段是 int64, 锚定 Java↔Go 数值契约必须是 long primitive
+// (NOT NULL DEFAULT 0). Java 端 EntitlementModelBucketDO 字段类型为 long (非 Long 装箱),
+// 且 V29 DDL 明确 NOT NULL. 若上游漏算或迁库脚本失误返 null, Go 端 unmarshal int64 会失败,
+// 整个 ListBuckets RPC 失败 → ListModels fail-OPEN 退回 v0.17 全量 (header standby-tkdist-error).
+// 这是 fail-fast 而非 silently 0 化, 避免 UI 显示 0 让用户误以为耗尽.
+type BucketInfo struct {
+	// QuotaEtu 该 modelId 下全部桶配额求和.
+	QuotaEtu int64 `json:"quotaEtu"`
+
+	// UsedEtu 全部桶已消费量求和.
+	UsedEtu int64 `json:"usedEtu"`
+
+	// RemainingEtu 全部桶剩余量求和 (= QuotaEtu - UsedEtu, 上游已算好, SDK 不再二次计算).
+	RemainingEtu int64 `json:"remainingEtu"`
+
+	// SharedPoolEtu 来自通配桶的求和子集 (会被跨模型消耗). v0.18+ 新增字段:
+	// 老 v0.17 客户端不读此字段时仍可工作 (RemainingEtu 已含该部分);
+	// 但 UI 展示"a 模型还剩 1500"时, 用户发现该值会随其他模型的使用而下降, 容易困惑.
+	// 推荐 UI: "a 自有 1000 ETU + 共享池 500 ETU (跨模型可用)".
+	SharedPoolEtu int64 `json:"sharedPoolEtu,omitempty"`
+
+	// ExpiresAt 最高优先级桶的过期时间; nil 表示永久权益 (该桶无过期).
+	// 注意: 多桶聚合时此值不一定是"最早过期", 而是"会先扣那个桶"的过期时间.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+
+	// BucketClass 最高优先级桶的类别 — BucketClassCommercial (付费购买) 或 BucketClassGeneric (通配/赠送).
+	// 用于 UI 区分"商业付费余量" vs "通用兜底余量".
+	// V30 二轮审计 D-P1-3: 字面量已上提为常量 (见 BucketClassCommercial / BucketClassGeneric),
+	//   推荐用 IsCommercial() 大小写不敏感判断, 避免 "commercial" vs "COMMERCIAL" 字面量漂移.
+	BucketClass string `json:"bucketClass"`
+
+	// Expired 用户在此 modelId 上的全部桶都已过期 (任何一个还活着就是 false).
+	// UI 可据此灰显模型 + 提示"已过期, 请购买续费".
+	Expired bool `json:"expired,omitempty"`
+}
+
+// BucketClass 字面量常量 — V30 二轮审计 D-P1-3 修复.
+//
+// 上游 nexus-v4 通过 strings.EqualFold 解析 (大小写不敏感), Java 端 EntitlementController
+// 输出 "COMMERCIAL"/"GENERIC" (uppercase). SDK 用户应优先用 IsCommercial() 等帮助方法,
+// 避免直接字面量比较 (例如 `m.BucketClass == "commercial"` 严格比较即静默 bug).
+const (
+	BucketClassCommercial = "COMMERCIAL"
+	BucketClassGeneric    = "GENERIC"
+)
+
+// IsCommercial 大小写不敏感判定 — V30 二轮审计 D-P1-3.
+//
+// 与上游 buildBucketView (managed_model.go) 的 EqualFold 语义对齐, 即使 Java 端将来
+// 切大小写也仍可工作. 推荐 SDK 用户用此方法而非直接 b.BucketClass == "COMMERCIAL".
+func (b *BucketInfo) IsCommercial() bool {
+	if b == nil {
+		return false
+	}
+	return strings.EqualFold(b.BucketClass, BucketClassCommercial)
 }
 
 // ModelCapabilities 模型能力矩阵
