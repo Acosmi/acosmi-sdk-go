@@ -450,6 +450,25 @@ func (c *Client) ListModelsWithStatus(ctx context.Context) ([]ManagedModel, Filt
 	return resp.Data, status, nil
 }
 
+// GetQuotaSummary 查询当前用户账户级权益总览 (v0.19+).
+//
+// 返回 *QuotaSummary 含免费/付费各自总额 + 桶详情 + 各自最近到期时间.
+// 用于个人中心钱包栏: UI 一次拿完整钱包视图, 不需要遍历 ListModels 客户端聚合.
+//
+// 与 ListModels 的区别:
+//   - ListModels: 按 modelId 聚合 BucketInfo, 答"a 模型还能用多少", 走 entitlement 过滤
+//   - GetQuotaSummary: 账户级钱包概览, 答"我整体还有多少免费 + 付费", 不过滤 (用户必须看自己钱包)
+//
+// 鉴权: JWT 或 Desktop OAuth (entitlements scope).
+// 失败语义: tk-dist 不可达 → 500 + non-nil err; 空桶用户 → 200 + 全 0 + 空切片.
+func (c *Client) GetQuotaSummary(ctx context.Context) (*QuotaSummary, error) {
+	var resp APIResponse[QuotaSummary]
+	if err := c.doJSON(ctx, http.MethodGet, "/entitlements/quota-summary", nil, &resp, false); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
 // GetModelCapabilities 查询单个模型的能力矩阵
 // 优先从 ListModels 缓存读取, miss 时调用 ListModels 刷新
 func (c *Client) GetModelCapabilities(ctx context.Context, modelID string) (*ModelCapabilities, error) {

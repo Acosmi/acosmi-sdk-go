@@ -132,6 +132,16 @@ type BucketInfo struct {
 	// Expired 用户在此 modelId 上的全部桶都已过期 (任何一个还活着就是 false).
 	// UI 可据此灰显模型 + 提示"已过期, 请购买续费".
 	Expired bool `json:"expired,omitempty"`
+
+	// FreeRemainingEtu v0.19+ 新增 — GENERIC alive 桶 tokenRemaining 求和.
+	// "免费余额" (月度免费 + 邀请奖励 + 试用桶); 仅 alive 桶, 即真实可消费余量.
+	// 与 RemainingEtu 区别: RemainingEtu 含过期 (历史 UX 兼容), Free/Paid 仅 alive.
+	// 推荐 UI 显示这两个新字段而非 RemainingEtu (alive-only 数字更真实).
+	FreeRemainingEtu int64 `json:"freeRemainingEtu"`
+
+	// PaidRemainingEtu v0.19+ 新增 — COMMERCIAL alive 桶 tokenRemaining 求和.
+	// "付费余额" (购买套餐桶); 仅 alive 桶.
+	PaidRemainingEtu int64 `json:"paidRemainingEtu"`
 }
 
 // BucketClass 字面量常量 — V30 二轮审计 D-P1-3 修复.
@@ -153,6 +163,69 @@ func (b *BucketInfo) IsCommercial() bool {
 		return false
 	}
 	return strings.EqualFold(b.BucketClass, BucketClassCommercial)
+}
+
+// =============================================================================
+// QuotaSummary — v0.19+ 账户级权益总览 (免费/付费切分)
+// =============================================================================
+//
+// 来源: GET /api/v4/entitlements/quota-summary, 调用 Client.GetQuotaSummary 获取.
+//
+// 设计目的: 个人中心钱包栏一次性展示"我还有多少免费 + 多少付费"+ 各自最近到期时间;
+// 与 ListModels 走的逐模型 BucketInfo 是不同维度 — 后者是"a 模型还能用多少", 此处是
+// "整个账户全部桶"概览.
+//
+// 字段语义:
+//   - FreeTotalEtu / PaidTotalEtu: 仅 alive 桶 tokenRemaining 求和 (即真实可消费余额);
+//     UI 应直接显示这两个数字, 而非 BucketInfo.RemainingEtu (后者含过期, 是历史兼容).
+//   - FreeBuckets / PaidBuckets: 含全部桶 (含 expired) — 用于 UI 列流水/历史/标"已过期".
+//     永远是切片 (空时为 []), 不是 nil — 前端不需 null 检查.
+//   - NextFreeExpiresAt / NextPaidExpiresAt: 各 class 中最早到期 alive 桶的 expiresAt;
+//     永久桶不参与 (无 expiresAt). 双字段允许 UI 分别提示
+//     "免费 X 天后到期" + "付费 Y 天后到期".
+//
+// V30 entitlement-listing 不影响此端点 — 此端点不走过滤 (用户必须看自己钱包全量).
+type QuotaSummary struct {
+	// FreeTotalEtu GENERIC (免费/赠送) alive 桶 tokenRemaining 求和.
+	FreeTotalEtu int64 `json:"freeTotalEtu"`
+
+	// PaidTotalEtu COMMERCIAL (付费购买) alive 桶 tokenRemaining 求和.
+	PaidTotalEtu int64 `json:"paidTotalEtu"`
+
+	// FreeBuckets GENERIC 桶详情 (含过期, UI 列流水); 空时为空切片.
+	FreeBuckets []BucketRow `json:"freeBuckets"`
+
+	// PaidBuckets COMMERCIAL 桶详情 (含过期); 空时为空切片.
+	PaidBuckets []BucketRow `json:"paidBuckets"`
+
+	// NextFreeExpiresAt GENERIC alive 桶中最早到期; 永久桶/无 alive 时为 nil.
+	NextFreeExpiresAt *time.Time `json:"nextFreeExpiresAt,omitempty"`
+
+	// NextPaidExpiresAt COMMERCIAL alive 桶中最早到期; 同上.
+	NextPaidExpiresAt *time.Time `json:"nextPaidExpiresAt,omitempty"`
+}
+
+// BucketRow 单桶视图 — QuotaSummary.FreeBuckets/PaidBuckets 元素.
+//
+// 是 BucketInfo 的"单桶版" (BucketInfo 是按 modelId 聚合后的视图, BucketRow 是单桶原始).
+// 不暴露 EntitlementID / CoefficientVersion / AllowedModelsJson (内部实现细节).
+type BucketRow struct {
+	BucketID       string     `json:"bucketId"`
+	ModelID        string     `json:"modelId"`     // 精确桶为具体 modelId, 通配桶为 "*"
+	BucketClass    string     `json:"bucketClass"` // COMMERCIAL | GENERIC
+	TokenQuota     int64      `json:"tokenQuota"`
+	TokenUsed      int64      `json:"tokenUsed"`
+	TokenRemaining int64      `json:"tokenRemaining"`
+	ExpiresAt      *time.Time `json:"expiresAt,omitempty"` // 永久桶为 nil
+	Expired        bool       `json:"expired,omitempty"`
+}
+
+// IsCommercial 大小写不敏感判定 — 与 BucketInfo.IsCommercial 同语义.
+func (r *BucketRow) IsCommercial() bool {
+	if r == nil {
+		return false
+	}
+	return strings.EqualFold(r.BucketClass, BucketClassCommercial)
 }
 
 // ModelCapabilities 模型能力矩阵

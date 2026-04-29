@@ -1,6 +1,6 @@
 # Acosmi Go SDK 开发手册
 
-> v0.18.1 | Go 1.22+ | MIT
+> v0.19.0 | Go 1.22+ | MIT
 
 ## 目录
 
@@ -986,6 +986,84 @@ if resp.ModelTokenRemaining >= 0 {
 - ETU 与 raw token 不是 1:1: 用 `OutputCoef` 反向除可估算 raw 等值,但精确量在 hold/settle 时才确定
 - GENERIC 桶模型受 `AllowedModelsJSON` 白名单限制,调白名单外的模型会 403 `MODEL_NOT_ALLOWED`
 - 灰度期老用户 entitlement 可能无桶 (`ListBuckets` 返回空), 此时仍走 legacy 单池路径,不影响 Chat 调用
+
+#### V0.19: 钱包总览 — 免费/付费切分 (v0.19.0+)
+
+**痛点**: V29 暴露的是"按 modelId 聚合"或"全部桶 raw 列表", 个人中心钱包栏想一次显示
+"我还有 X 万免费 Token + Y 万付费 Token, 各自最近 Z 天到期"必须客户端自己 filter+sum,
+易写错且每个调用方重复实现.
+
+**解决**: 新增 `GetQuotaSummary` 端点 + SDK 一次拿账户级钱包视图.
+
+```go
+// 个人中心钱包栏一次拿全
+sum, err := client.GetQuotaSummary(ctx)
+if err != nil {
+    return err
+}
+
+// 总额 — 仅 alive 桶 (即真实可消费余额, 与 RemainingEtu 含过期不同)
+fmt.Printf("免费余额: %d ETU\n", sum.FreeTotalEtu)
+fmt.Printf("付费余额: %d ETU\n", sum.PaidTotalEtu)
+
+// 最近到期 — 双字段允许分别提示, 单字段会折叠掉一种维度
+if sum.NextFreeExpiresAt != nil {
+    days := int(time.Until(*sum.NextFreeExpiresAt).Hours() / 24)
+    fmt.Printf("免费余额 %d 天后到期\n", days)
+}
+if sum.NextPaidExpiresAt != nil {
+    days := int(time.Until(*sum.NextPaidExpiresAt).Hours() / 24)
+    fmt.Printf("付费余额 %d 天后到期\n", days)
+}
+
+// 详细桶列表 — 含过期 (UI 列流水/历史/标"已过期")
+for _, b := range sum.FreeBuckets {
+    status := "alive"
+    if b.Expired { status = "expired" }
+    fmt.Printf("  [%s] %s: %d/%d (%s)\n", b.BucketClass, b.BucketID, b.TokenRemaining, b.TokenQuota, status)
+}
+```
+
+**字段映射**:
+
+| 字段 | 含义 | alive-only |
+|------|------|------------|
+| `FreeTotalEtu` | GENERIC 桶 (月度免费/邀请/试用) tokenRemaining 求和 | ✅ |
+| `PaidTotalEtu` | COMMERCIAL 桶 (购买套餐) tokenRemaining 求和 | ✅ |
+| `FreeBuckets[]` | GENERIC 桶详情 (含过期, UI 列流水) | ❌ 含全部 |
+| `PaidBuckets[]` | COMMERCIAL 桶详情 (含过期) | ❌ 含全部 |
+| `NextFreeExpiresAt` | GENERIC alive 桶最早到期 (永久桶不参与) | ✅ |
+| `NextPaidExpiresAt` | COMMERCIAL alive 桶最早到期 | ✅ |
+
+**与 BucketInfo (per-model) 的区别**:
+
+| 维度 | `ManagedModel.BucketInfo` (V0.18) | `QuotaSummary` (V0.19) |
+|------|-----------------------------------|------------------------|
+| 粒度 | 单 modelId 聚合 | 整账户全局 |
+| `RemainingEtu` 语义 | 含过期桶 (历史 UX 兼容) | N/A (拆成 FreeTotalEtu/PaidTotalEtu, 仅 alive) |
+| 用例 | 模型选择器卡片 "a 模型还能用多少" | 个人中心 "我整体还有多少钱" |
+| 走 entitlement 过滤 | ✅ (V30 二轮: 永远过滤) | ❌ (用户必须看自己钱包全量) |
+
+**ManagedModel.BucketInfo 同步增强 (v0.19+)**: 单模型卡片也加了 `FreeRemainingEtu` /
+`PaidRemainingEtu` 字段 (alive-only), 推荐用这两个新字段而非 `RemainingEtu`:
+
+```go
+models, _ := client.ListModels(ctx)
+for _, m := range models {
+    if m.BucketInfo == nil { continue }
+    // 新方式 (推荐, alive-only)
+    fmt.Printf("%s: 免费 %d + 付费 %d ETU 可用\n",
+        m.ModelID, m.BucketInfo.FreeRemainingEtu, m.BucketInfo.PaidRemainingEtu)
+    // 老方式 (含过期, 仅向后兼容)
+    // fmt.Printf("%s: %d ETU\n", m.ModelID, m.BucketInfo.RemainingEtu)
+}
+```
+
+**鉴权**: JWT 或 Desktop OAuth (`entitlements` scope) — 与 ListBuckets 同 group.
+
+**失败语义**: tk-dist 不可达/5xx → 500 + non-nil err; 空桶用户 (V9 老用户/未购未领) → 200 + 全 0 + 空切片 (`FreeBuckets/PaidBuckets` 永不为 nil, 前端不需 null 检查).
+
+**缓存提醒**: SDK 不内置缓存 — 调用方自行节流, 建议 ≥ 30s/account (个人中心刷新够用).
 
 ### 4.5 流量包商城
 
@@ -2080,6 +2158,40 @@ make install    # → $GOPATH/bin
 ---
 
 ## 12. 版本记录
+
+### v0.19.0 (2026-04-29) — 钱包总览 + 免费/付费切分 (V30 后续增量)
+
+**背景**: V30 一二轮把 ListModels 接通了 entitlement, 但 SDK 用户实际 UI 渲染时发现痛点:
+后端虽分了 COMMERCIAL/GENERIC 桶, SDK 暴露的余量字段是单字段 `RemainingEtu` 含过期 — 个人中心
+钱包栏想一次显示"我还有 X 万免费 + Y 万付费 Token, 各自 Z 天到期"必须客户端 filter+sum, 易写错且每个调用方重复实现.
+
+**SDK 端新增 (向后兼容)**:
+- 新类型 `QuotaSummary` + `BucketRow` + `client.GetQuotaSummary(ctx)` — 个人中心钱包栏一次拿全, 含 FreeTotalEtu/PaidTotalEtu/FreeBuckets[]/PaidBuckets[]/NextFreeExpiresAt/NextPaidExpiresAt 6 字段 (alive-only 总额 + 含过期详情列表 + 双独立到期字段).
+- `BucketInfo` 新增 `FreeRemainingEtu` / `PaidRemainingEtu` 字段 (alive-only, 即真实可消费余额); 旧 `RemainingEtu` 保留但标注"含过期, 历史 UX 兼容, 推荐用 Free/Paid".
+- `BucketRow.IsCommercial()` 大小写不敏感判定 (与 `BucketInfo.IsCommercial` 同语义).
+
+**配套 nexus-v4 backend**:
+- 新端点 `GET /api/v4/entitlements/quota-summary` (复用 EntitlementHandler.tkdistClient, 走 AuthOrDesktopScope `entitlements` 同 group).
+- `aggregateBucketInfo` 注入 alive-only `FreeRemainingEtu` / `PaidRemainingEtu` 到 `BucketInfoResponse`, ListModels 响应每模型卡片现在带 6 字段 (旧 4 + 新 2).
+
+**设计决策 (调研 web/profile + EntitlementServiceImpl + filterModelsByEntitlement 后定):**
+1. **命名 = Free/Paid**: 前端 i18n 已用 `'月度免费'/'付费套餐'/'免费试用'`, 用户视角而非 internal `Generic/Commercial`.
+2. **expired 桶 = alive-only**: Java 端 `selectBucketForUpdate` 不消费过期桶, 新字段 alive-only 才是真实可消费余额; 旧 `RemainingEtu` 含过期保兼容.
+3. **不过滤**: 用户看自己钱包总览必须全量 — `QuotaSummary` 端点不走 entitlement 过滤逻辑.
+4. **NextExpiresAt 双字段**: 单字段会折叠"免费 X 天到期 vs 付费 Y 天到期"两条独立 UI 提示能力, 双字段允许分别提示.
+
+**部署 sequence**:
+1. 先发 SDK v0.19.0 (向后兼容, 老 v0.18.1 客户端调新/老 nexus 都正常 — 新字段反序列化为 0/nil).
+2. 部署 nexus-v4 backend (架构 + 端点补齐) — tk-dist 零修改.
+3. 前端按需切到新字段 (老 `RemainingEtu` 仍可用, 不阻塞).
+
+**示例**:
+```go
+sum, _ := client.GetQuotaSummary(ctx)
+fmt.Printf("免费: %d ETU (%v 到期) | 付费: %d ETU (%v 到期)\n",
+    sum.FreeTotalEtu, sum.NextFreeExpiresAt,
+    sum.PaidTotalEtu, sum.NextPaidExpiresAt)
+```
 
 ### v0.18.1 (2026-04-29) — V30 二轮审计闭环 (架构根因修复 + 安全加固)
 
